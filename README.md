@@ -67,3 +67,12 @@ which is licensed under the Apache-2.0 license.
 
 ## Contributing
 See the [CONTRIBUTING](CONTRIBUTING.md) file for how to contribute to the project.
+## Deep-network memory experiments
+
+See [SF depth-memory experiment](docs/sf_depth_memory.md) for an independent-process
+SF/BP comparison at 2, 4, 8, 16, 32, and 64 layers, CUDA peak-memory measurement,
+and reproducible commands. Generate the experiment plan without GPU dependencies:
+
+```bash
+python3 src/benchmark_depth_memory.py --output results/depth-plan --dry-run
+```
