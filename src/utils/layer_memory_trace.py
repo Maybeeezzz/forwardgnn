@@ -4,21 +4,131 @@ import linecache
 from pathlib import Path
 import sys
 import time
+import weakref
+import inspect
+import types
+from contextlib import contextmanager
+
+from memory_stage_summary import StageResolver, StageMemorySummary
+
+
+class TensorInventory:
+    """Inspect reachable tensors without retaining them or evaluating properties.
+
+    Storage identities describe observations, not allocator allocation lifetimes.
+    Missing storage may still be retained by autograd or native code.
+    """
+    def __init__(self, torch, device):
+        self.torch = torch
+        self.device = device
+        self.previous = {}
+
+    def capture(self, roots):
+        variables, storages, errors = [], {}, []
+
+        def visit(value, path, ancestors):
+            if self.torch.is_tensor(value):
+                if value.device.type != "cuda" or value.device.index != self.device.index:
+                    return
+                try:
+                    if value.layout != self.torch.strided:
+                        errors.append({"path": path, "reason": "non-strided tensor; storage not enumerated"})
+                        return
+                    storage = (value.untyped_storage() if hasattr(value, "untyped_storage")
+                               else value.storage())
+                    size = storage.nbytes()
+                    pointer = storage.data_ptr()
+                    # _cdata distinguishes simultaneously live zero-sized storages.
+                    identity = getattr(storage, "_cdata", pointer)
+                    key = "{}:{}:{}".format(value.device, identity, pointer)
+                    row = dict(path=path, shape=list(value.shape), dtype=str(value.dtype),
+                               device=str(value.device), logical_bytes=value.numel() * value.element_size(),
+                               storage_id=key, storage_bytes=size, storage_offset=value.storage_offset(),
+                               stride=list(value.stride()), requires_grad=value.requires_grad,
+                               grad_fn=type(value.grad_fn).__name__ if value.grad_fn is not None else None,
+                               is_parameter=isinstance(value, self.torch.nn.Parameter))
+                    variables.append(row)
+                    entry = storages.setdefault(key, dict(storage_id=key, bytes=size, aliases=[]))
+                    entry["aliases"].append(path)
+                    if isinstance(value, self.torch.nn.Parameter) and value.grad is not None:
+                        visit(value.grad, path + ".grad", ancestors)
+                except (RuntimeError, TypeError, AttributeError) as exc:
+                    errors.append({"path": path, "reason": str(exc)})
+                return
+            if value is None or isinstance(value, (str, bytes, int, float, bool)):
+                return
+            if id(value) in ancestors:
+                return
+            if len(ancestors) >= 32:
+                errors.append({"path": path, "reason": "container depth limit"})
+                return
+            ancestors = ancestors | {id(value)}
+            if isinstance(value, dict):
+                for index, (key, child) in enumerate(value.items()):
+                    # Never stringify tensor keys (optimizer.state uses Parameters).
+                    name = repr(key) if isinstance(key, (str, int, float, bool)) else "key#{}".format(index)
+                    visit(child, path + "[" + name + "]", ancestors)
+            elif isinstance(value, (list, tuple)):
+                for index, child in enumerate(value):
+                    visit(child, path + "[{}]".format(index), ancestors)
+            else:
+                # Traverse existing attributes only; never invoke getters or lazy tensor operations.
+                if type(value).__module__.split('.')[-1] in ('memory_analysis', 'layer_memory_trace', 'memory_stage_summary'):
+                    return
+                excluded = (type, types.ModuleType, types.FunctionType, types.MethodType)
+                if not isinstance(value, excluded) and hasattr(value, '__dict__'):
+                    for name, child in vars(value).items():
+                        if "hook" not in name:
+                            visit(child, path + "." + name, ancestors)
+
+
+        for name, value in roots:
+            visit(value, name, set())
+        appeared = [entry for key, entry in storages.items() if key not in self.previous]
+        disappeared = [entry for key, entry in self.previous.items() if key not in storages]
+        resized = [dict(storage_id=key, before_bytes=self.previous[key]["bytes"], after_bytes=entry["bytes"])
+                   for key, entry in storages.items()
+                   if key in self.previous and self.previous[key]["bytes"] != entry["bytes"]]
+        alias_changes = [dict(storage_id=key,
+                              added=sorted(set(entry['aliases']) - set(self.previous[key]['aliases'])),
+                              removed=sorted(set(self.previous[key]['aliases']) - set(entry['aliases'])))
+                         for key, entry in storages.items() if key in self.previous
+                         and set(entry['aliases']) != set(self.previous[key]['aliases'])]
+        self.previous = storages  # Metadata only: no tensor/storage/frame references.
+        return dict(variables=variables, storages=list(storages.values()),
+                    unique_storage_bytes=sum(entry["bytes"] for entry in storages.values()),
+                    logical_bytes_with_aliases=sum(row["logical_bytes"] for row in variables),
+                    appeared_storages=appeared, disappeared_storages=disappeared,
+                    resized_storages=resized, alias_changes=alias_changes, inspection_errors=errors)
 
 
 class LayerMemoryTrace:
-    def __init__(self, torch, device, model, directory):
+    def __init__(self, torch, device, model, directory, variable_details=True, trace_roots=None):
         self.torch, self.device = torch, device
         self.path = Path(directory)
         self.stream = (self.path / 'memory-events.jsonl').open('w')
-        self.layers = {id(layer): i + 1 for i, layer in enumerate(
-            model.layers if hasattr(model, 'layers') else model.convs)}
-        for module in model.modules():
-            for layer_id, index in list(self.layers.items()):
-                if id(module) == layer_id:
-                    for child in module.modules():
-                        self.layers[id(child)] = index
-                    break
+        self.model_ref = weakref.ref(model)
+        self.inventory = TensorInventory(torch, device) if variable_details else None
+        self.variable_stream = ((self.path / 'memory-variables.jsonl').open('w')
+                                if variable_details else None)
+        self.variable_peak = None
+        self.stage_resolver = StageResolver()
+        self.stage_summary = StageMemorySummary()
+        self.scopes = []
+        self.closed = False
+        self.trace_roots = tuple(Path(p).resolve() for p in (trace_roots or [Path(__file__).resolve().parents[1]]))
+        self.excluded_files = {str(Path(__file__).resolve()),
+                               str(Path(__file__).with_name('memory_analysis.py').resolve()),
+                               str(Path(__file__).resolve().parents[1] / 'memory_stage_summary.py')}
+        self.model_files = set()
+        self.layers = {}
+        for name, module in model.named_modules():
+            self.layers[id(module)] = name or 'model'
+            try:
+                self.model_files.add(str(Path(inspect.getfile(type(module))).resolve()))
+            except (TypeError, OSError):
+                pass
+        self.stage_resolver.select_file = self.select_file
         self.handles = []
         self.previous = None
         self.count = 0
@@ -31,21 +141,47 @@ class LayerMemoryTrace:
         self.by_layer = {}
         self.active = False
         self.old_trace = None
-        layers = model.layers if hasattr(model, 'layers') else model.convs
-        for i, layer in enumerate(layers):
-            for name, param in layer.named_parameters():
-                if param.requires_grad:
-                    self.handles.append(param.register_hook(self.gradient_hook(i + 1, name)))
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                owner = name.rsplit('.', 1)[0] if '.' in name else 'model'
+                self.handles.append(param.register_hook(self.gradient_hook(owner, name)))
+
+    def select_file(self, filename):
+        path = Path(filename).resolve()
+        if str(path) in self.excluded_files:
+            return False
+        return str(path) in self.model_files or any(path == root or root in path.parents for root in self.trace_roots)
+
+    @contextmanager
+    def stage(self, name, layer=None, epoch=None):
+        """Optional explicit labels for any algorithm; no tensor lifetime changes."""
+        context = dict(phase=name, layer=layer, epoch_zero_based=epoch)
+        self.scopes.append(context)
+        self.boundary({'event': 'stage_enter', 'phase': name}, frame=sys._getframe(2))
+        try:
+            yield
+        finally:
+            self.boundary({'event': 'stage_exit', 'phase': name}, frame=sys._getframe(2))
+            self.scopes.pop()
+            outer = (self.scopes[-1] if self.scopes else
+                     dict(phase='other', layer=None, epoch_zero_based=None))
+            self.previous = dict(self.previous, stage_context=dict(outer))
 
     def gradient_hook(self, layer, name):
         def hook(gradient):
             # Returning None preserves the incoming gradient. Never retain it.
             if self.active:
                 self.boundary({'event': 'parameter_gradient_ready', 'layer': layer,
-                               'parameter': name, 'phase': 'backward'})
+                               'parameter': name, 'phase': 'backward'},
+                              frame=sys._getframe(1),
+                              extra_roots=[('incoming_gradient', gradient)])
         return hook
 
-    def boundary(self, location):
+    def boundary(self, location, frame=None, extra_roots=None):
+        location = dict(location)
+        location['stage_context'] = (dict(self.scopes[-1]) if self.scopes else
+                                     self.stage_resolver.resolve(frame, location, self.layers))
+        stage_context = (self.previous or location)['stage_context']
         t, d = self.torch, self.device
         t.cuda.synchronize(d)
         allocated = t.cuda.memory_allocated(d)
@@ -53,9 +189,33 @@ class LayerMemoryTrace:
         peak_a = t.cuda.max_memory_allocated(d)
         peak_r = t.cuda.max_memory_reserved(d)
         row = dict(sequence=self.count, seconds=time.perf_counter() - self.started,
-                   end=location, interval_after=self.previous,
+                   end=location, interval_after=self.previous, stage_context=stage_context,
                    allocated_bytes=allocated, reserved_bytes=reserved,
                    interval_peak_allocated_bytes=peak_a, interval_peak_reserved_bytes=peak_r)
+        if self.inventory is not None:
+            roots = [('model', self.model_ref())]
+            ancestor, depth = frame, 0
+            while ancestor is not None:
+                filename = ancestor.f_code.co_filename.replace('\\', '/')
+                if self.select_file(filename):
+                    for name, value in ancestor.f_locals.items():
+                        roots.append(('frame{}.{}.{}'.format(depth, ancestor.f_code.co_name, name), value))
+                ancestor, depth = ancestor.f_back, depth + 1
+            roots.extend(extra_roots or [])
+            details = self.inventory.capture(roots)
+            del roots, ancestor
+            details.update(sequence=self.count, end=location, stage_context=stage_context)
+            self.stage_summary.observe(row, details, stage_context)
+            details['allocator_minus_visible_storage_bytes'] = allocated - details['unique_storage_bytes']
+            self.variable_stream.write(json.dumps(details) + '\n')
+            self.variable_stream.flush()
+            row['visible_unique_storage_bytes'] = details['unique_storage_bytes']
+            row['allocator_minus_visible_storage_bytes'] = details['allocator_minus_visible_storage_bytes']
+            row['appeared_visible_storage_bytes'] = sum(x['bytes'] for x in details['appeared_storages'])
+            row['disappeared_visible_storage_bytes'] = sum(x['bytes'] for x in details['disappeared_storages'])
+            if self.variable_peak is None or allocated > self.variable_peak['allocated_bytes']:
+                self.variable_peak = dict(sequence=self.count, allocated_bytes=allocated,
+                                          storages=sorted(details['storages'], key=lambda x: x['bytes'], reverse=True)[:20])
         label = self.previous or location
         layer = str(label.get('layer', 'unassigned'))
         self.by_layer[layer] = max(self.by_layer.get(layer, 0), peak_a)
@@ -84,13 +244,7 @@ class LayerMemoryTrace:
     def trace(self, frame, event, arg):
         filename = frame.f_code.co_filename.replace('\\', '/')
         function = frame.f_code.co_name
-        selected = (
-            filename.endswith('/train_backprop.py') and function in ('train', 'test') or
-            filename.endswith('/gnn_sf.py') and function in ('forward_train', 'eval_model', 'forward', '__init__', 'augment') or
-            filename.endswith('/train_utils.py') and function in ('step', 'save_checkpoint', 'load_checkpoint') or
-            '/torch_geometric/nn/conv/' in filename and function == 'forward' or
-            filename.endswith('/gnn/gnn_conv.py') and function == 'forward'
-        )
+        selected = self.select_file(filename)
         if not selected:
             return None
         if event in ('call', 'line', 'return', 'exception'):
@@ -100,15 +254,8 @@ class LayerMemoryTrace:
             location['class'] = type(owner).__name__
             if id(owner) in self.layers:
                 location['layer'] = self.layers[id(owner)]
-            ancestor = frame
-            while ancestor is not None:
-                if ancestor.f_code.co_filename.endswith(('gnn_sf.py', 'train_backprop.py')):
-                    if 'epoch' in ancestor.f_locals and isinstance(ancestor.f_locals['epoch'], int):
-                        location.setdefault('epoch_zero_based', ancestor.f_locals['epoch'])
-                    if 'i' in ancestor.f_locals and isinstance(ancestor.f_locals['i'], int):
-                        location.setdefault('layer', ancestor.f_locals['i'] + 1)
-                ancestor = ancestor.f_back
-            self.boundary(location)
+            self.boundary(location, frame=frame,
+                          extra_roots=[('return_value', arg)] if event == 'return' else None)
         return self.trace
 
     def start(self):
@@ -116,16 +263,19 @@ class LayerMemoryTrace:
         if self.old_trace is not None:
             raise RuntimeError('Run memory tracing without an existing Python debugger/trace.')
         self.active = True
-        self.boundary({'event': 'start', 'phase': 'before_gpu_transfer'})
+        self.boundary({'event': 'start', 'phase': 'before_gpu_transfer'}, frame=sys._getframe(1))
         sys.settrace(self.trace)
 
     def end_window(self, name):
-        self.boundary({'event': 'window_end', 'phase': name})
+        self.boundary({'event': 'window_end', 'phase': name}, frame=sys._getframe(1))
         result = dict(self.window)
         self.window = dict.fromkeys(self.window, 0)
         return result
 
     def close(self):
+        if self.closed:
+            return
+        self.closed = True
         if self.active:
             sys.settrace(self.old_trace)
             self.active = False
@@ -133,7 +283,11 @@ class LayerMemoryTrace:
             handle.remove()
         self.handles.clear()
         self.stream.close()
+        if self.variable_stream is not None:
+            self.variable_stream.close()
+            self.stage_summary.write(self.path)
         summary = dict(events=self.count, whole_peak=self.maximum,
+                       largest_observed_boundary_storages=self.variable_peak,
                        interval_peaks_by_layer_bytes=self.by_layer,
                        largest_peak_interval=self.best, top_peak_intervals=self.top,
                        largest_release_intervals=self.releases,
@@ -163,4 +317,15 @@ class LayerMemoryTrace:
         lines += ['', 'See memory-events.jsonl for chronological boundaries and gradient-ready events.',
                   'A drop in allocated with unchanged reserved means allocator reuse, not release to the driver.',
                   'Layer-associated values include all live tensors; they are not exclusive per-layer sizes.']
+        if self.variable_peak is not None:
+            lines += ['', '## Visible storages at highest observed boundary allocation', '',
+                      'Event sequence: {}'.format(self.variable_peak['sequence']), '',
+                      '| MiB | Variable aliases (first 3) |', '|---:|---|']
+            for entry in self.variable_peak['storages']:
+                aliases = '; '.join(entry['aliases'][:3]).replace('|', '\\|')
+                lines.append('| {:.3f} | {} |'.format(entry['bytes'] / 2**20, aliases))
+            lines += ['', 'Full variable metadata and storage transitions: memory-variables.jsonl.',
+                      'Disappeared means no longer visible to this inventory, NOT proven allocator free.',
+                      'Transient interval peaks can exceed boundary observations; native/autograd tensors may be invisible.',
+                      'Storage identities may be reused between observations; transitions are not allocation histories.']
         (self.path / 'memory-trace-report.md').write_text('\n'.join(lines) + '\n')

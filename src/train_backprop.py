@@ -16,6 +16,7 @@ from torch_geometric.nn import GraphSAGE, GCN, GAT
 from tqdm import tqdm
 
 import settings
+from utils.memory_analysis import add_memory_arguments, memory_analysis
 from datasets import load_node_classification_data, load_link_prediction_data
 from utils.train_utils import setup_cuda, set_seed, EarlyStopping, SeedManager, ResultManager
 from utils.log_utils import log_stdout, logger
@@ -51,7 +52,8 @@ def main(args):
             raise ValueError(f"Invalid task: {args.task}")
 
         """Training and testing"""
-        result = trainer.train_test()
+        with memory_analysis(args, model, run_i):
+            result = trainer.train_test()
 
         perf_dict = {
             "perf": result["test_perf"],
@@ -298,6 +300,7 @@ class LinkPredictionTrainer:
 
 def parse_args():
     parser = argparse.ArgumentParser()
+    add_memory_arguments(parser)
     parser.add_argument('--task', type=str, default="node-class", choices=["link-pred", "node-class"],
                         help="graph learning task")
     parser.add_argument('--model', type=str, choices=["GNN-SAGE", "GNN-GCN", "GNN-GAT"],

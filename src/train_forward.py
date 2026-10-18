@@ -12,6 +12,7 @@ from typing import Optional
 import numpy as np
 
 import settings
+from utils.memory_analysis import add_memory_arguments, memory_analysis
 from datasets import load_node_classification_data, load_link_prediction_data
 from forward_learning.linkpred import (
     GNNForward,
@@ -51,22 +52,23 @@ def main(args):
                                                     lr=args.lr,
                                                     data=data,
                                                     args=args)
-            model = model.to(args.device)
+            with memory_analysis(args, model, run_i):
+                model = model.to(args.device)
 
-            """Training"""
-            result = model.forward_train(data, result_manager, run_i)
+                """Training"""
+                result = model.forward_train(data, result_manager, run_i)
 
-            """Testing"""
-            data = data.to(args.device)
-            if isinstance(model, (GNNSingleForward,
-                                  GNNTop2InputSF,
-                                  GNNTop2LossSF)):
-                acc, _ = model.eval_model(eval_mask=data.test_mask, print_eval=True)
-            elif isinstance(model, (GNNLabelAppendingFF, GNNVirtualNodeLabelAppendingFF)):
-                acc, _ = model.eval_model(data, train_mask=data.train_mask | data.val_mask, eval_mask=data.test_mask, print_eval=True)
-            else:
-                raise ValueError(f"Invalid model: {model}")
-            perf = acc
+                """Testing"""
+                data = data.to(args.device)
+                if isinstance(model, (GNNSingleForward,
+                                      GNNTop2InputSF,
+                                      GNNTop2LossSF)):
+                    acc, _ = model.eval_model(eval_mask=data.test_mask, print_eval=True)
+                elif isinstance(model, (GNNLabelAppendingFF, GNNVirtualNodeLabelAppendingFF)):
+                    acc, _ = model.eval_model(data, train_mask=data.train_mask | data.val_mask, eval_mask=data.test_mask, print_eval=True)
+                else:
+                    raise ValueError(f"Invalid model: {model}")
+                perf = acc
         # Link Prediction
         elif args.task == "link-pred":
             train_data, val_data, test_data, data = load_link_prediction_data(args, split_i=run_i)
@@ -77,15 +79,16 @@ def main(args):
                                                 lr=args.lr,
                                                 data=data,
                                                 args=args)
-            model = model.to(args.device)
+            with memory_analysis(args, model, run_i):
+                model = model.to(args.device)
 
-            """Training"""
-            result = model.forward_train(train_data, val_data, test_data, result_manager, run_i)
+                """Training"""
+                result = model.forward_train(train_data, val_data, test_data, result_manager, run_i)
 
-            """Testing"""
-            test_data = test_data.to(args.device)
-            auc, _ = model.eval_model(test_data)
-            perf = auc
+                """Testing"""
+                test_data = test_data.to(args.device)
+                auc, _ = model.eval_model(test_data)
+                perf = auc
         else:
             raise ValueError(f"Invalid task: {args.task}")
 
@@ -211,6 +214,7 @@ def build_link_prediction_model(model_type, n_layers, hidden_size, loss_fn_name,
 
 def parse_args():
     parser = argparse.ArgumentParser()
+    add_memory_arguments(parser)
 
     parser.add_argument('--task', type=str, default="node-class", choices=["link-pred", "node-class"],
                         help="graph learning task")

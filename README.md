@@ -76,3 +76,12 @@ and reproducible commands. Generate the experiment plan without GPU dependencies
 ```bash
 python3 src/benchmark_depth_memory.py --output results/depth-plan --dry-run
 ```
+
+## Optional memory analysis
+
+Add `--memory-analysis` to `src/train_forward.py`, `src/train_backprop.py`, or
+`src/train_backprop_sparse.py` to record CUDA memory boundaries, deduplicated tensor
+storage, and per-module/per-stage memory tables. It is off by default. Use
+`--memory-analysis-dir results/memory-debug` to choose the output root. The reusable
+`MemoryAnalysis` context also supports custom stage labels without depending on a
+learning algorithm. See [memory analysis utility](docs/layer_memory_profile.md).

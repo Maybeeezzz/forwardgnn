@@ -14,6 +14,7 @@ import torch
 
 import train_backprop as official
 from datasets.datasplit import DataSplit
+from utils.memory_analysis import memory_analysis
 from utils.train_utils import ResultManager, SeedManager, set_seed
 
 
@@ -71,14 +72,21 @@ def synchronize(device):
         torch.cuda.synchronize(device)
 
 
-def memory_peaks(device):
+def memory_peaks(device, analysis=None):
     if device.type != 'cuda':
         return None
+    if analysis is not None and analysis.tracer is not None:
+        analysis.tracer.boundary({'event': 'measurement'})
+        peak_a = analysis.tracer.maximum['allocated_bytes']
+        peak_r = analysis.tracer.maximum['reserved_bytes']
+    else:
+        peak_a = torch.cuda.max_memory_allocated(device)
+        peak_r = torch.cuda.max_memory_reserved(device)
     return {
-        'peak_allocated_bytes': torch.cuda.max_memory_allocated(device),
-        'peak_reserved_bytes': torch.cuda.max_memory_reserved(device),
-        'peak_allocated_mib': torch.cuda.max_memory_allocated(device) / 2**20,
-        'peak_reserved_mib': torch.cuda.max_memory_reserved(device) / 2**20,
+        'peak_allocated_bytes': peak_a,
+        'peak_reserved_bytes': peak_r,
+        'peak_allocated_mib': peak_a / 2**20,
+        'peak_reserved_mib': peak_r / 2**20,
     }
 
 
@@ -116,17 +124,18 @@ def main(args):
         preparation_seconds = timer() - started
         trainer = official.NodeClassificationTrainer(model, data, args.device,
                                                      args.lr, args.epochs, args.patience, args)
-        synchronize(args.device)
-        if args.cuda:
-            torch.cuda.reset_peak_memory_stats(args.device)
-        started = timer()
-        train_time, train_epochs = trainer.train()
-        synchronize(args.device)
-        training_wall_seconds = timer() - started
-        training_memory = memory_peaks(args.device)
-        test_acc = trainer.test()
-        synchronize(args.device)
-        run_memory = memory_peaks(args.device)
+        with memory_analysis(args, model, run_i) as analysis:
+            synchronize(args.device)
+            if args.cuda:
+                torch.cuda.reset_peak_memory_stats(args.device)
+            started = timer()
+            train_time, train_epochs = trainer.train()
+            synchronize(args.device)
+            training_wall_seconds = timer() - started
+            training_memory = memory_peaks(args.device, analysis)
+            test_acc = trainer.test()
+            synchronize(args.device)
+            run_memory = memory_peaks(args.device, analysis)
         manager.save_run_result(run_i, {
             'perf': test_acc, 'train_time': train_time,
             'train_epochs': [train_epochs], 'best_val_epochs': [-1],
@@ -141,7 +150,9 @@ def main(args):
             'training_and_test_memory': run_memory,
             'memory_scope': 'Device transfer, training, validation and checkpoint restore; '
                             'training_and_test_memory additionally includes official test(). '
-                            'CPU graph preparation excluded. Absolute allocator peaks, no hooks.',
+                            'CPU graph preparation excluded. Absolute allocator peaks. ' +
+                            ('Instrumented memory analysis enabled.' if getattr(args, 'memory_analysis', False)
+                             else 'No hooks.'),
         })
         path.write_text(json.dumps(result, indent=2) + '\n')
         del trainer, model, data

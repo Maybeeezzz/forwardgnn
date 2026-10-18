@@ -1,105 +1,165 @@
-# 原论文范围内的逐层显存诊断
+# 可选的通用显存分析 utility
 
-本功能全部为新增文件，不修改原 SF/BP 训练代码，也不修改已有深度扫描入口。
-入口为 `src/profile_layer_memory.py`，脚本为 `exp/nodeclass/nodeclass-layer-memory.sh`。
-监控实现为 `src/utils/layer_memory_trace.py`。
+显存分析由 `src/utils/memory_analysis.py` 提供，**普通训练默认关闭**，使用
+`--memory-analysis` 启用。不需要修改模型算法，不限定 SF、BP、节点分类或链接预测，
+不要求模型具有 `.layers` 或 `.convs` 属性。模型通过标准 `named_modules()` 和
+`named_parameters()` 接口识别。低层采集仍在 `LayerMemoryTrace`，阶段汇总在
+`src/memory_stage_summary.py`。
 
-## 实验范围
+## 命令行开关
 
-延续当前节点分类 SF/BP 对照，默认采用原论文的五个数据集：CitationFull-CiteSeer、
-CitationFull-Cora_ML、CitationFull-PubMed、Amazon-Photo、GitHub；GCN/SAGE/GAT；
-1、2、3、4 层；宽度 128；五个作者划分。明确拒绝超过 4 层的请求。
-不包含合成图、更多深度或链接预测扩展。
+`train_forward.py`、`train_backprop.py`、`train_backprop_sparse.py` 支持相同参数：
 
-默认每层/整体最多 1000 epoch（SF/BP），patience=100，val_every=2，Adam lr=0.001、
-weight_decay=0.0005。模型和训练算法直接调用仓库实现。沿用此前实验的 FP32、关闭 TF32、
-GCN/SAGE 确定性设置；这并非已证实与原论文显存测量口径一致的复现。
-完整矩阵包含 600 个独立子进程，逐行同步插桩会显著减慢运行，建议先单配置验证。
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--memory-analysis` | 关闭 | 开启 CUDA 逐边界、变量/storage 和阶段分析 |
+| `--memory-analysis-dir PATH` | 当前实验结果目录下 `memory-analysis/` | 分析输出根目录，不单独启用分析 |
+| `--memory-analysis-no-variables` | 关闭 | 仅保留 allocator 边界测量，不输出变量清单和阶段分类表 |
 
-## 运行
+不开启时 context 是 no-op，不实例化采集器、不注册 hooks、不修改 Python trace、不创建
+分析文件、不调用 CUDA 显存统计。开启后需要 CUDA，CPU/MPS 不提供替代显存结果。
+每次实际执行的 run 建立 `runN-时间戳/` 独立目录，终端打印路径。
+原训练入口的“已有结果则跳过”规则不变；分析实验建议使用新的 `--exp-setting`，不要
+因为启用了分析就默默重跑已有实验。测量覆盖 context 内的设备传输、训练和最终测试；
+CPU 数据加载与模型构造不包含在窗口内。
 
-以下命令从仓库根目录执行，结果目录必须新建或为空：
+从仓库根目录运行 SF 示例（SF 只是调用者，不是 utility 的实现前提）：
 
 ```bash
-# 无需 torch 的计划检查
-python3 src/profile_layer_memory.py --output results/layer-plan --dry-run
-
-# 小预算验证监控是否工作；不能用来代表完整训练结果
-bash exp/nodeclass/nodeclass-layer-memory.sh --gpu 0 \
-  --datasets Amazon-Photo --architectures GCN --depths 4 \
-  --runs 1 --epochs 3 --patience -1 --output results/layer-smoke
-
-# 定位已观察到的 SAGE 高峰值
-bash exp/nodeclass/nodeclass-layer-memory.sh --gpu 0 \
-  --datasets Amazon-Photo --architectures SAGE --depths 1 2 3 4 \
-  --runs 1 --epochs 3 --patience -1 --output results/layer-sage-diagnostic
-
-# 完整原论文范围矩阵
-bash exp/nodeclass/nodeclass-layer-memory.sh --gpu 0 \
-  --output results/layer-paper
+python src/train_forward.py \
+  --task node-class --model GNN_SingleForward-SAGE \
+  --dataset Amazon-Photo --num-layers 2 --num-hidden 128 \
+  --num-runs 1 --epochs 3 --patience -1 --gpu 0 \
+  --exp-setting memory-debug-sf \
+  --memory-analysis --memory-analysis-dir results/memory-debug-sf
 ```
 
-CUDA、torch_geometric、torch_sparse 必须可用。父进程在启动训练前检查全部所需的
-作者划分，缺失时一次列出，避免 GitHub 缺划分导致大量重复失败。
-脚本不自动生成新划分，不使用 CPU/MPS 替代显存结果。
+BP 使用同一个开关：
 
-## 记录什么
+```bash
+python src/train_backprop.py \
+  --task node-class --model GNN-SAGE \
+  --dataset Amazon-Photo --num-layers 2 --num-hidden 128 \
+  --num-runs 1 --epochs 3 --patience -1 --gpu 0 \
+  --exp-setting memory-debug-bp \
+  --memory-analysis --memory-analysis-dir results/memory-debug-bp
+```
 
-监控直接跟踪原 SF/BP 函数及 PyG 卷积 forward 的 Python 执行边界，保留文件、源码行、
-函数、层号和可获取的 epoch；每个边界执行 CUDA synchronize，读取当前 allocated/reserved
-和自上次边界以来的峰值，然后重置峰值统计。全部区间峰值取最大值恢复监控窗口的高水位。
+去掉 `--memory-analysis` 即恢复普通训练。原训练器的超参数、数据划分和训练行为不变。
+Sparse BP 开启分析时，其峰值字段使用采集器累计高水位，避免逐边界 reset 使原结果变成
+最后一个区间的峰值；结果中明确记录 instrumentation，不能和无插桩耗时直接比较。
 
-包括：
+## 作为 Python utility 使用
 
-- GPU 传输、SF 图增强和训练准备。
-- 每层前向及卷积 forward 内部 Python 步骤，如聚合、线性变换。
-- loss 构造、zero_grad、backward 和 optimizer.step 对应语句。
-- 各层参数梯度就绪回调，帮助观察 BP 反向阶段的层顺序。
-- 验证、测试、early-stopping checkpoint 保存/恢复。
-- SF 层间前向、detach、局部函数返回和下一次边界之间的释放。
+在 `src` 可导入的环境中：
 
-梯度 hook 返回 None，不修改梯度；日志仅保存标量和文本，不保留张量引用。
-不调用 gc.collect 或 empty_cache，不修改张量生命周期策略。
+```python
+from utils.memory_analysis import MemoryAnalysis
 
-每个配置目录新增：
+with MemoryAnalysis(
+    enabled=args.memory_analysis,
+    model=model,
+    device=device,
+    directory="results/custom-memory",
+    trace_roots=["/absolute/path/to/my/training/code"],
+) as memory:
+    model = model.to(device)
+    for epoch in range(epochs):
+        with memory.stage("forward", layer="encoder", epoch=epoch):
+            output = model(inputs)
+        with memory.stage("loss_build", layer="encoder", epoch=epoch):
+            loss = criterion(output, targets)
+        with memory.stage("zero_grad", epoch=epoch):
+            optimizer.zero_grad()
+        with memory.stage("backward", epoch=epoch):
+            loss.backward()
+        with memory.stage("optimizer_step", epoch=epoch):
+            optimizer.step()
+```
 
-| 文件 | 用途 |
+`stage()` 可选，支持任意阶段名称及嵌套；关闭分析时同样是 no-op。显式 scope 优先于
+自动识别，不必为新算法改 utility。手动 API 输出目录必须新建或为空，避免覆盖。
+退出 context 时移除 hooks、恢复 trace 并写表；训练异常也会关闭采集器、保存已有观测，
+不会吞掉训练异常。不支持与已启用的 Python debugger/trace 同时运行。
+
+默认追踪仓库 `src` 下代码与模型模块的源码文件；外部训练脚本使用 `trace_roots` 指定
+自己的目录。自动阶段识别根据通用的 forward、损失模块、backward、optimizer.step、
+zero_grad 调用和 evaluate/test 等函数约定推断，不引用 SF 类名、算法文件名或固定行号。
+跨行调用使用 AST 语句范围。无法可靠推断的语句归为 `other`；自定义层间传递、图准备等
+业务语义请使用 `stage()` 明确标记。模块列使用标准模块路径（例如 `layers.0.gnn_layer`、
+`convs.0.lin`），没有模块归属的全局步骤显示 `—`，不是虚构的数字层号。
+
+## 输出与阶段显存表
+
+| 文件 | 内容 |
 |---|---|
-| memory-events.jsonl | 完整时间顺序记录；每条立即刷新，失败时也保留已写事件 |
-| memory-trace-summary.json | 最大峰值区间、峰值最高的 20 个区间、回落最大的 20 个区间、按层关联的绝对峰值 |
-| memory-trace-report.md | 可直接阅读的峰值及释放位置表 |
-| measurement.json | 插桩下的训练/最终测试/全程峰值及模型结果 |
-| stdout.log | 原训练日志及错误 |
+| `memory-events.jsonl` | 位置、模块、epoch、当前 allocated/reserved、区间峰值、净变化和回落 |
+| `memory-variables.jsonl` | 同一 sequence 的变量清单、storage 去重、别名变化和存储可见性变化 |
+| `memory-stage-summary.md` | 模块/层 × 阶段 × 类别的 MiB 表 |
+| `memory-stage-summary.csv` | 同样的宽表，用于 Excel 分析 |
+| `memory-stage-summary.json` | 阶段选中快照的分类 storage 及全部变量别名 |
+| `memory-trace-report.md` | 最高峰区间、最大回落及大 storage 摘要 |
+| `memory-trace-summary.json` | 完整摘要与事件索引 |
 
-根目录另提供原样式 matrix.json、summary.csv、report.md、trends.json 与 plan.json。
-这些结果属于插桩诊断，应与之前无插桩的深度扫描结果分开解释。
+阶段表列包括模块/层、阶段、epoch、sequence、allocated，以及参数、梯度、优化器状态、
+早停副本、缓存、图数据、logits/loss、激活、其他可见、未归因差额与区间峰值。
 
-## 如何理解峰值和回收
+每行取该模块、阶段跨 epoch 的 **allocated 最高已观测边界**，所有类别来自同一快照，
+按 storage 去重。同 allocated 时取最早快照。分类总和加未归因差额等于该行 allocated。
+这是该时刻整个进程的显存构成，包含其他模块常驻状态；不是当前模块独占显存，也不是
+该阶段新增量。区间内部瞬时峰值可能更高，不能用边界清单完整解释它。
 
-`interval_after` 表示区间起始位置，`end` 表示结束边界。Python `line` 事件发生在语句执行前，
-所以区间的内存变化应归到前一个事件之后的执行过程，不能直接归给结束行。
-函数 return 事件发生在局部变量真正销毁之前，释放可能在下一个边界才被观测。
-层号从 1 开始；epoch_zero_based 从 0 开始。
+变量记录路径、shape、dtype、device、逻辑字节数、storage 字节数/身份/偏移、stride、
+requires_grad、grad_fn、是否 Parameter。遍历模型、选定调用栈局部变量、容器及对象已有
+属性，不调用属性 getter 或进行 tensor 计算，不把张量、storage、frame 保留到历史日志。
+扫描范围包含参数梯度、优化器状态、数据、激活、缓存、checkpoint，以及 hook 的
+`incoming_gradient` 和返回值。不会扫描全局 GC 或遍历 autograd 图。
 
-- `allocated_delta_bytes < 0`：两个边界间，存活张量占用净减少。
-- `peak_to_end_drop_bytes > 0`：区间内达到峰值后已回落；可发现同一条原生调用内创建又释放的临时内存。
-- allocated 下降、reserved 不变：内存已可供 PyTorch 分配器复用，但缓存仍被保留。
-- reserved 下降：分配器保留的内存减少，可能已归还 CUDA 驱动。
+同一 storage 的别名可能具有不同语义，唯一分类优先级为：梯度 → 参数 → 优化器状态 →
+早停副本 → 缓存 → 图数据 → logits/loss → 激活 → 其他可见。参数使用 Parameter 标记，
+其他类别基于属性路径和常见变量名推断；分类不是 allocator 的原生标签。无法辨认的对象
+保留“其他可见”。输入与图数据共享存储时归图数据，参数的局部别名仍归参数。
 
-“净减少”和“峰值回落”都不是累计释放字节数。区间内若发生多次分配和释放，不能从两个
-边界完整重建每次操作。时间戳是同步后的 CPU 相对时间，而非每次 cudaFree 的精确时间。
-本工具定位的是释放发生的代码区间，而不是每个 allocator free 事件。
+- `unique_storage_bytes`：可见 storage 去重总量。
+- `logical_bytes_with_aliases`：含别名的逻辑大小之和，不能当成真实显存。
+- `appeared_storages` / `disappeared_storages`：相邻边界可见 storage 集合变化。
+- `alias_changes` / `resized_storages`：别名和存储容量变化。
+- `allocator_minus_visible_storage_bytes`：allocated 与可见存储的有符号差额，不自动归因为激活或泄漏。
+- `inspection_errors`：非 strided 张量不支持、遍历深度限制或读取失败。
 
-反向阶段用参数梯度就绪回调提供层关联观测，不声称它精确对应整个层的 backward 开始/结束。
-底层 C++/CUDA 算子内部归因需要进一步使用专门的算子 profiler。按层汇总的数值是该层关联
-区间中的**全进程绝对显存**，包含其他层的存活状态，不能相加或当作该层独占显存。
+**不可见不等于已释放。** autograd 或原生算子可能仍持有 storage；需要结合 allocated
+净下降和峰值回落判断。它们也不是累计 free 字节数。storage 身份/地址可能复用，因此
+快照差分不能重建完整 allocation/free 历史。allocated 下降而 reserved 不变通常说明
+分配器保留空间供复用。临时张量和原生对象需要结合算子 profiler 进一步归因。
 
-逐行同步和梯度 hook 会改变异步执行时序，因此诊断耗时不能作为性能速度结论，峰值也应
-用无插桩实验交叉验证。CUDA OOM 时总结仅包含已完成边界；尚未成功记录的区间不可视作零。
-监控范围在最终推理结束，进程退出后的统一显存释放不在其中。
+Python line 事件在执行前发生，变化归属 `interval_after` 所指的执行区间；return 事件
+也早于局部引用销毁。日志不执行 gc.collect/empty_cache。同步和逐边界清单会显著改变
+耗时及异步时序，建议先跑 1 run、2 层、3 epoch，并用无插桩运行交叉验证峰值。
 
-## 本机验证状态
+## 查看或重建表（无需 PyTorch）
 
-已进行 Python 3.8 语法检查、CLI/原论文矩阵范围检查，以及模拟 allocator 的峰值、窗口重置、
-释放和日志输出验证。本机默认 Python 无 PyTorch/CUDA，尚未验证真实 GPU hooks、峰值和梯度
-一致性。应在原 ForwardLearningGNN CUDA 环境先执行上面的小预算验证，再运行完整矩阵。
+用终端输出的实际 run 子目录替换下方路径：
+
+```bash
+python src/inspect_memory_event.py results/memory-debug-sf/run0-TIMESTAMP --top 20
+python src/inspect_memory_event.py results/memory-debug-sf/run0-TIMESTAMP --sequence 100
+python src/memory_stage_summary.py results/memory-debug-sf/run0-TIMESTAMP
+```
+
+阶段字段出现之前的旧日志需要重跑，不能可靠补全。
+
+## 保留的批量实验入口
+
+`profile_layer_memory.py` 是显式调用分析器的历史 SF/BP 配对实验驱动，不是 utility 的
+使用前提。它仍支持原论文 1–4 层矩阵、`--methods sf`、`--no-variable-details`、
+`--dry-run` 和作者划分检查；层字段现在采用通用模块路径。普通训练使用上面的可选开关。
+
+## 验证
+
+```bash
+python -m unittest discover -s tests -p 'test_memory*.py' -v
+```
+
+无依赖测试覆盖默认关闭、普通入口参数、没有 layers/convs 的模型、异常清理、自定义
+scope、storage 别名去重、优化器/梯度、同快照阶段表和离线查看器。原生 CUDA 测试在没有
+PyTorch/CUDA 时明确 skip。本机未执行真实 GPU 训练跟踪。

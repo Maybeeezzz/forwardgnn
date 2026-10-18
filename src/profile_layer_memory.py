@@ -26,6 +26,9 @@ def parse_args():
     p.add_argument('--datasets', nargs='+', choices=DATASETS, default=DATASETS)
     p.add_argument('--architectures', nargs='+', choices=['GCN', 'SAGE', 'GAT'], default=['GCN', 'SAGE', 'GAT'])
     p.add_argument('--depths', nargs='+', type=int, default=[1, 2, 3, 4])
+    p.add_argument('--methods', nargs='+', choices=['sf', 'bp'], default=['sf', 'bp'])
+    p.add_argument('--no-variable-details', action='store_true',
+                   help='Disable reachable tensor/storage inventory; retain allocator tracing.')
     p.add_argument('--hidden', type=int, default=128)
     p.add_argument('--runs', type=int, default=5)
     p.add_argument('--epochs', type=int, default=1000)
@@ -87,7 +90,8 @@ def worker_impl(config, state):
     parameter_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
     manager = ResultManager('layer-profile', args, seeds)
     from utils.layer_memory_trace import LayerMemoryTrace
-    tracer = LayerMemoryTrace(torch, device, model, config['directory'])
+    tracer = LayerMemoryTrace(torch, device, model, config['directory'],
+                              variable_details=config.get('variable_details', True))
     state['tracer'] = tracer
     torch.cuda.synchronize(device)
     torch.cuda.reset_peak_memory_stats(device)
@@ -200,11 +204,13 @@ def main(a):
     configs = []
     for dataset, arch, depth, run in itertools.product(a.datasets, a.architectures, sorted(a.depths), range(a.runs)):
         for method in (['sf', 'bp'] if run % 2 == 0 else ['bp', 'sf']):
+            if method not in a.methods:
+                continue
             directory = output / '{}-{}-L{}-run{}-{}'.format(dataset, arch, depth, run, method)
             configs.append(dict(dataset=dataset, architecture=arch, depth=depth, run=run,
                                 method=method, directory=str(directory), hidden=a.hidden,
                                 seed=a.seed, epochs=a.epochs, patience=a.patience,
-                                val_every=a.val_every, gpu=a.gpu))
+                                val_every=a.val_every, gpu=a.gpu, variable_details=not a.no_variable_details))
     hashes = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
               for p in sorted((ROOT / 'src').rglob('*.py'))}
     write_json(output / 'plan.json', {'configurations': configs, 'source_sha256': hashes, 'dry_run': a.dry_run, 'instrumented': True})
