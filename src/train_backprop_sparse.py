@@ -91,6 +91,8 @@ def memory_peaks(device, analysis=None):
 
 
 def main(args):
+    if getattr(args, 'memory_analysis_operators', False):
+        raise ValueError('Use train_backprop.py for operator analysis; this sparse benchmark owns separate peak windows.')
     seeds = SeedManager(args.seed)
     manager = ResultManager('bp-{}-results'.format(args.graph_backend), args, seeds)
     import torch_geometric

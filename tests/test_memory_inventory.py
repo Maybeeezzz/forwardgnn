@@ -9,6 +9,7 @@ import sys
 from types import SimpleNamespace
 import unittest
 import weakref
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
@@ -144,6 +145,29 @@ class InventoryTests(unittest.TestCase):
         result = module.TensorInventory(fake_torch(), Device()).capture([('other', tensor), ('sparse', sparse)])
         self.assertEqual(result['unique_storage_bytes'], 0)
         self.assertEqual(len(result['inspection_errors']), 1)
+
+    def test_native_gradient_hook_without_python_parent(self):
+        torch, model = fake_torch(), Module()
+        gradient = Tensor(Storage(7, 16))
+        reference = weakref.ref(gradient)
+        with tempfile.TemporaryDirectory() as directory:
+            tracer = module.LayerMemoryTrace(torch, Device(), model, directory)
+            tracer.active = True
+            # Reproduce a C++ -> Python callback with only the hook frame.
+            with patch.object(module.sys, '_getframe', return_value=SimpleNamespace(f_back=None)) as getframe:
+                self.assertIsNone(tracer.gradient_hook('encoder', 'weight')(gradient))
+                getframe.assert_called_once_with()
+            tracer.active = False  # This test did not install sys.settrace.
+            tracer.close()
+            event = json.loads((Path(directory) / 'memory-events.jsonl').read_text())
+            details = json.loads((Path(directory) / 'memory-variables.jsonl').read_text())
+            self.assertFalse(event['end']['python_parent_frame_available'])
+            self.assertEqual(event['stage_context']['phase'], 'backward')
+            self.assertEqual(details['unique_storage_bytes'], 16)
+            self.assertEqual(details['variables'][0]['path'], 'incoming_gradient')
+            del gradient
+            gc.collect()
+            self.assertIsNone(reference())
 
     def test_boundary_output_and_disabled_inventory(self):
         torch, model = fake_torch(), Module()

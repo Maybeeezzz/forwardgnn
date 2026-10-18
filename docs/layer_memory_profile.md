@@ -163,3 +163,133 @@ python -m unittest discover -s tests -p 'test_memory*.py' -v
 无依赖测试覆盖默认关闭、普通入口参数、没有 layers/convs 的模型、异常清理、自定义
 scope、storage 别名去重、优化器/梯度、同快照阶段表和离线查看器。原生 CUDA 测试在没有
 PyTorch/CUDA 时明确 skip。本机未执行真实 GPU 训练跟踪。
+
+## 算子级分析：定位聚合内部的临时分配
+
+新增独立的 `--memory-analysis-operators` 模式。在 `--memory-analysis` 开启的前提下，
+它以 PyTorch profiler **替代**逐行 Python trace，不同时运行变量清单采集器。训练算法
+保持不变，只在指定模块的指定一次 forward 前后开启/关闭 profiler。模型路径由调用者
+传入，utility 不绑定 SAGE 或 SF。
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `--memory-analysis-operators` | 关闭 | 算子/分配事件模式 |
+| `--memory-analysis-module PATH` | 不指定 | 精确匹配 named_modules 路径；不指定时记录整个 context |
+| `--memory-analysis-call N` | 1 | 目标模块的第 N 次 forward，含训练、评估、层间重算 |
+| `--memory-analysis-record-shapes` | 关闭 | 记录 profiler 操作输入形状，可能影响张量生命周期 |
+| `--memory-analysis-tensor-ops` | 关闭 | 额外记录 Python dispatcher 可见的输入/输出 Tensor 元数据 |
+
+支持 `train_forward.py` 和 `train_backprop.py`，也支持直接 `MemoryAnalysis(operators=True,
+...)`。专门的 `train_backprop_sparse.py` 拥有独立峰值窗口，当前拒绝算子模式以避免相互
+reset 污染结果；稀疏模型可通过 Python utility 自行包裹。普通逐行模式仍可用于该入口。
+
+采用 PyTorch 1.13 已有的 profile_memory、with_stack、export_chrome_trace API，
+不依赖新版本的 export_memory_timeline 或 allocator history 私有接口。可选 Tensor
+元数据使用 `torch.utils._python_dispatch.TorchDispatchMode`，与基础 profiler 分开开关。
+
+### CUDA 服务器命令（无需环境变量）
+
+在更新后的仓库根目录，激活 `ForwardLearningGNN` 环境。先记录分配事件，不记录形状：
+
+```bash
+python src/train_forward.py \
+  --task node-class --model GNN_SingleForward-SAGE --dataset Amazon-Photo \
+  --num-layers 2 --num-hidden 128 --num-runs 1 --seed 100 \
+  --epochs 3 --lr 0.001 --patience -1 --val-every 1 \
+  --append-label none --aug-edge-direction bidirection --temperature 1.0 --gpu 0 \
+  --exp-setting memory-op-sf-alloc --overwrite-result \
+  --memory-analysis --memory-analysis-operators \
+  --memory-analysis-module layers.0.gnn_layer.gnn.aggr_module \
+  --memory-analysis-call 6 \
+  --memory-analysis-dir results/memory-op-sf-alloc
+```
+
+对于此前“两层、每层三 epoch、关闭早停”的 SF 流程，第一层聚合依次执行：3 次训练、
+第一层结束测试、第一层层间重算、第二层结束测试、最终测试。第 6 次调用对应原事件
+1143 的评估聚合位置。改变训练预算/验证规则后次数可能不同；要定位第一次训练的聚合，
+用 `--memory-analysis-call 1`。不存在模块或目标调用未发生会明确报错，不生成零值结论。
+
+再独立运行形状与 Tensor 元数据诊断：
+
+```bash
+python src/train_forward.py \
+  --task node-class --model GNN_SingleForward-SAGE --dataset Amazon-Photo \
+  --num-layers 2 --num-hidden 128 --num-runs 1 --seed 100 \
+  --epochs 3 --lr 0.001 --patience -1 --val-every 1 \
+  --append-label none --aug-edge-direction bidirection --temperature 1.0 --gpu 0 \
+  --exp-setting memory-op-sf-tensors --overwrite-result \
+  --memory-analysis --memory-analysis-operators \
+  --memory-analysis-module layers.0.gnn_layer.gnn.aggr_module \
+  --memory-analysis-call 6 \
+  --memory-analysis-record-shapes --memory-analysis-tensor-ops \
+  --memory-analysis-dir results/memory-op-sf-tensors
+```
+
+第二层目标路径为 `layers.1.gnn_layer.gnn.aggr_module`。BP 的 SAGE 聚合通常为
+`convs.0.aggr_module`，可在普通 BP 命令中使用同样的参数。参数错误会列出可用模块。
+
+### 输出文件与读法
+
+每次 run 的时间戳子目录内保存：
+
+| 文件 | 内容 |
+|---|---|
+| `operator-metadata.json` | 目标调用、软件/GPU、确定性设置、是否训练/grad_enabled、输入/输出元数据、窗口峰值 |
+| `operator-trace.json` | 原始 Chrome/Kineto trace，可在 Perfetto / Chrome trace viewer 中打开 |
+| `operator-events.json` | 操作名称、输入形状、调用栈、self/inclusive 净内存变化 |
+| `operator-memory-events.csv` | CUDA 分配/释放时间线、地址、字节数、分配器总量、所属 CPU 操作 |
+| `operator-allocations.csv` | 按大小排列的单次分配、独立 allocation ID 和匹配的释放时间 |
+| `operator-allocation-totals.csv` | 每操作累计分配、最大单次分配、trace 峰值时本窗口新分配且存活的字节 |
+| `operator-allocation-summary.json` | 上述结果及 trace 峰值时的活跃分配列表 |
+| `operator-memory-report.md` | 汇总报告，包括大分配操作、生命周期、调用栈示例和边界 Tensor |
+| `operator-tensors.jsonl` | 仅 tensor-ops 模式：操作输入/输出 shape、dtype、storage 地址/大小、偏移 |
+
+先比较 metadata 的 start/peak/end allocated，确认新窗口是否复现约 12.44 GiB 的临时
+回落；再看大分配表的操作名称、单次字节、分配/释放时间。相同地址可能复用，所以按
+allocation ID 区分生命周期。trace 峰值的活跃列表只含窗口内新分配，**不含窗口前已有
+的 704.67 MiB 输入消息或模型参数**。
+
+累计分配不能当成峰值（反复分配后释放也累加）。profiler 的 self/inclusive memory 是
+净变化；某操作内部先分配再释放数 GiB，净值仍可能是 0。所有分配事件按同一 CPU 线程
+上最内层包围操作归因，不能把它说成直接测到了某个 CUDA kernel 的私有变量。
+
+Input Dims 是**操作输入形状**，不能拿来冒充新分配块的形状。tensor-ops 输出可识别一部分
+实际 Tensor 的 shape/dtype/storage；C++ 内部中间 Tensor 或 workspace 未必会经过 Python
+可见 dispatcher。两种日志的时间基准不同，地址比较必须结合生命周期，工具不自动把
+相同地址认定为同一张量。无法恢复变量名的临时分配保留为分配块，不猜测。
+
+[PyTorch 1.13 profiler 源码说明](https://github.com/pytorch/pytorch/blob/v1.13.1/torch/profiler/profiler.py)
+明确指出 record_shapes 可能保留 Tensor 引用或引入额外复制。因此以第一轮定位分配高水位，
+第二轮帮助解释形状；两者峰值不一致时不能混合为一份测量。原阶段诊断也是独立的插桩结果。
+
+若 trace 没有 CUDA `[memory]` 事件，报告标为 `no_cuda_memory_events`，不将缺失当作零；
+需要检查该服务器 profiler/CUPTI 构建和原始 trace。调用栈缺失同样显式显示为不可用。
+异常时保留 partial 记录并移除 hooks，不能把失败窗口当成完整结果。
+
+无需 PyTorch 的报告重建：
+
+```bash
+python src/operator_memory_report.py results/memory-op-sf-alloc/run0-TIMESTAMP
+```
+
+自动查看两次最新报告（无需替换时间戳）：
+
+```bash
+python - <<'PY'
+from pathlib import Path
+for name in ('memory-op-sf-alloc', 'memory-op-sf-tensors'):
+    root = Path('results') / name
+    runs = sorted(p for p in root.glob('run0-*') if p.is_dir())
+    if not runs:
+        raise SystemExit('没有运行目录: ' + str(root))
+    report = runs[-1] / 'operator-memory-report.md'
+    if not report.exists():
+        raise SystemExit('尚未生成报告，请检查 operator-metadata.json: ' + str(runs[-1]))
+    print('\n=== ' + str(report) + ' ===\n' + report.read_text())
+PY
+```
+
+运行 `python -m unittest discover -s tests -v` 包括算子分析测试。无 CUDA 时仅做解析器、
+调用次数选择、地址复用、临时分配归因、异常清理等测试；真实 profiler/dispatcher smoke
+测试明确 skip。实际 12.44 GiB 来源必须依据服务器新生成的日志，不能从旧边界日志反推
+具体底层操作或张量名。

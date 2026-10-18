@@ -85,3 +85,9 @@ storage, and per-module/per-stage memory tables. It is off by default. Use
 `--memory-analysis-dir results/memory-debug` to choose the output root. The reusable
 `MemoryAnalysis` context also supports custom stage labels without depending on a
 learning algorithm. See [memory analysis utility](docs/layer_memory_profile.md).
+
+For allocations inside a single operator/module call, add
+`--memory-analysis-operators --memory-analysis-module <named-module-path>`.
+This runs a separate profiler mode with allocation/free timelines, operator stacks,
+and optional Tensor input/output metadata. See the utility documentation for the
+two-pass CUDA commands and interpretation limits.

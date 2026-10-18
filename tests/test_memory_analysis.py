@@ -49,6 +49,16 @@ class AnalysisTests(unittest.TestCase):
                 args = scope['parse_args']()
                 self.assertTrue(args.memory_analysis)
                 self.assertEqual(args.memory_analysis_dir, '/tmp/example')
+            with patch.object(sys, 'argv', [filename, '--memory-analysis', '--memory-analysis-operators',
+                                           '--memory-analysis-module', 'encoder.aggregate',
+                                           '--memory-analysis-call', '2', '--memory-analysis-record-shapes',
+                                           '--memory-analysis-tensor-ops']):
+                args = scope['parse_args']()
+                self.assertTrue(args.memory_analysis_operators)
+                self.assertEqual(args.memory_analysis_module, 'encoder.aggregate')
+                self.assertEqual(args.memory_analysis_call, 2)
+                self.assertTrue(args.memory_analysis_record_shapes and args.memory_analysis_tensor_ops)
+
 
     def test_enabled_scope_and_exception_restore_trace(self):
         torch = fake_torch()

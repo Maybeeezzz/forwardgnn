@@ -171,9 +171,13 @@ class LayerMemoryTrace:
         def hook(gradient):
             # Returning None preserves the incoming gradient. Never retain it.
             if self.active:
+                # Native autograd workers may enter Python with no caller frame.
+                # The current hook frame always exists; its f_back may be None.
+                parent_frame = sys._getframe().f_back
                 self.boundary({'event': 'parameter_gradient_ready', 'layer': layer,
-                               'parameter': name, 'phase': 'backward'},
-                              frame=sys._getframe(1),
+                               'parameter': name, 'phase': 'backward',
+                               'python_parent_frame_available': parent_frame is not None},
+                              frame=parent_frame,
                               extra_roots=[('incoming_gradient', gradient)])
         return hook
 
