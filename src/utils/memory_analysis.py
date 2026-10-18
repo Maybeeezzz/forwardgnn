@@ -15,6 +15,10 @@ def add_memory_arguments(parser):
     group = parser.add_argument_group('optional memory analysis')
     group.add_argument('--memory-analysis', action='store_true',
                        help='Enable CUDA boundary, variable/storage and stage diagnostics (default: off).')
+    group.add_argument('--memory-analysis-algorithm', action='store_true',
+                       help='Track autograd saved storage and algorithm attribution (boundary mode only).')
+    group.add_argument('--memory-analysis-rules', default=None,
+                       help='JSON path/category rules for baseline and algorithm-specific tensors.')
     group.add_argument('--memory-analysis-dir', type=str, default=None,
                        help='Analysis output root; each run gets a new subdirectory.')
     group.add_argument('--memory-analysis-no-variables', action='store_true',
@@ -35,7 +39,8 @@ def add_memory_arguments(parser):
 class MemoryAnalysis:
     def __init__(self, enabled=False, model=None, device=None, directory=None,
                  variable_details=True, trace_roots=None, operators=False,
-                 target_module=None, target_call=1, record_shapes=False, tensor_ops=False):
+                 target_module=None, target_call=1, record_shapes=False, tensor_ops=False,
+                 algorithm=False, rules=None, metadata=None):
         self.enabled = enabled
         self.model, self.device = model, device
         self.directory = Path(directory) if directory is not None else None
@@ -43,12 +48,16 @@ class MemoryAnalysis:
         self.tracer = None
         self.operator_tracer = None
         self.operators = operators
+        self.algorithm, self.rules = algorithm, rules
+        self.metadata = metadata or {}
         self.operator_options = dict(target_module=target_module, target_call=target_call,
                                      record_shapes=record_shapes, tensor_ops=tensor_ops)
 
     def __enter__(self):
         if not self.enabled:
             return self
+        if self.algorithm and (self.operators or not self.variable_details):
+            raise ValueError('Algorithm attribution requires boundary mode with variable inventory.')
         import torch
         device = torch.device(self.device)
         if device.type != 'cuda' or not torch.cuda.is_available():
@@ -60,6 +69,11 @@ class MemoryAnalysis:
         if self.directory.exists() and any(self.directory.iterdir()):
             raise ValueError('Memory analysis output directory must be new or empty.')
         self.directory.mkdir(parents=True, exist_ok=True)
+        import json
+        (self.directory / 'memory-run.json').write_text(json.dumps(dict(
+            arguments=self.metadata, torch_version=getattr(torch, "__version__", "unknown"),
+            device=str(device), attribution='algorithm' if self.algorithm else 'standard'),
+            indent=2, default=str) + '\n')
         try:
             if self.operators:
                 from .operator_memory_trace import OperatorMemoryTrace
@@ -69,7 +83,8 @@ class MemoryAnalysis:
             else:
                 from .layer_memory_trace import LayerMemoryTrace
                 self.tracer = LayerMemoryTrace(torch, device, self.model, self.directory,
-                                               variable_details=self.variable_details, trace_roots=self.trace_roots)
+                                               variable_details=self.variable_details, trace_roots=self.trace_roots,
+                                               algorithm=self.algorithm, rules=self.rules)
                 torch.cuda.synchronize(device)
                 torch.cuda.reset_peak_memory_stats(device)
                 self.tracer.start()
@@ -111,6 +126,13 @@ class MemoryAnalysis:
 def memory_analysis(args, model, run_i=0):
     """CLI adapter. Constructed around a run, not inside model algorithms."""
     operators = getattr(args, 'memory_analysis_operators', False)
+    algorithm = getattr(args, 'memory_analysis_algorithm', False)
+    rules = getattr(args, 'memory_analysis_rules', None)
+    if algorithm and (not getattr(args, 'memory_analysis', False) or operators
+                      or getattr(args, 'memory_analysis_no_variables', False)):
+        raise ValueError('--memory-analysis-algorithm requires --memory-analysis with variables and no operator mode.')
+    if rules and not algorithm:
+        raise ValueError('--memory-analysis-rules requires --memory-analysis-algorithm.')
     if not getattr(args, 'memory_analysis', False):
         if operators:
             raise ValueError('--memory-analysis-operators requires --memory-analysis.')
@@ -127,4 +149,5 @@ def memory_analysis(args, model, run_i=0):
                           operators=operators, target_module=getattr(args, 'memory_analysis_module', None),
                           target_call=getattr(args, 'memory_analysis_call', 1),
                           record_shapes=getattr(args, 'memory_analysis_record_shapes', False),
-                          tensor_ops=getattr(args, 'memory_analysis_tensor_ops', False))
+                          tensor_ops=getattr(args, 'memory_analysis_tensor_ops', False),
+                          algorithm=algorithm, rules=rules, metadata=dict(vars(args), run_i=run_i))

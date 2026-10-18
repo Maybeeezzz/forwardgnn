@@ -1,0 +1,54 @@
+[
+  {
+    "pattern": "*.data.*",
+    "category": "model_baseline"
+  },
+  {
+    "pattern": "*.graph_augmenter.x",
+    "category": "model_baseline"
+  },
+  {
+    "pattern": "*.graph_augmenter.y",
+    "category": "model_baseline"
+  },
+  {
+    "pattern": "*.graph_augmenter.edge_index",
+    "category": "model_baseline"
+  },
+  {
+    "pattern": "*.graph_augmenter.*",
+    "category": "algorithm_data"
+  },
+  {
+    "pattern": "*.aug_graph.*",
+    "category": "algorithm_data"
+  },
+  {
+    "pattern": "*.forward_train.node_feats",
+    "category": "algorithm_cache"
+  },
+  {
+    "pattern": "*._cached_*",
+    "category": "algorithm_cache"
+  },
+  {
+    "pattern": "*.forward_train.logits",
+    "category": "objective"
+  },
+  {
+    "pattern": "*.forward_train.loss",
+    "category": "objective"
+  },
+  {
+    "pattern": "*.forward_train.train_node_emb",
+    "category": "objective"
+  },
+  {
+    "pattern": "*.forward_train.virtual_node_emb",
+    "category": "objective"
+  },
+  {
+    "pattern": "*.forward_train.train_y",
+    "category": "objective"
+  }
+]

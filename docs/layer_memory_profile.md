@@ -293,3 +293,7 @@ PY
 调用次数选择、地址复用、临时分配归因、异常清理等测试；真实 profiler/dispatcher smoke
 测试明确 skip。实际 12.44 GiB 来源必须依据服务器新生成的日志，不能从旧边界日志反推
 具体底层操作或张量名。
+
+## 模型基线与算法保留存储
+
+新增 `--memory-analysis-algorithm` 和 `--memory-analysis-rules`；支持 autograd 保存存储、参数梯度、优化器状态、SF 专有数据的去重归因与 SF/BP 对比。完整口径、测量边界和可运行脚本见 [algorithm_memory_analysis.md](algorithm_memory_analysis.md)。

@@ -40,6 +40,12 @@ class StageResolver:
             owner = ancestor.f_locals.get('self')
             if context['layer'] is None and id(owner) in layers:
                 context['layer'] = layers[id(owner)]
+            if context['layer'] in (None, 'model'):
+                for local_name in ('layer', 'conv'):
+                    candidate = layers.get(id(ancestor.f_locals.get(local_name)))
+                    if candidate:
+                        context['layer'] = candidate
+                        break
             if context['epoch_zero_based'] is None and isinstance(ancestor.f_locals.get('epoch'), int):
                 context['epoch_zero_based'] = ancestor.f_locals['epoch']
             frames.append(ancestor)

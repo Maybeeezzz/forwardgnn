@@ -1,0 +1,7 @@
+[
+  {"pattern": "*.data.*", "category": "model_baseline"},
+  {"pattern": "*.train_data.*", "category": "model_baseline"},
+  {"pattern": "*.val_data.*", "category": "model_baseline"},
+  {"pattern": "*.test_data.*", "category": "model_baseline"},
+  {"pattern": "*.train.loss", "category": "objective"}
+]

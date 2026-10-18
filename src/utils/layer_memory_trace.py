@@ -22,6 +22,8 @@ class TensorInventory:
         self.torch = torch
         self.device = device
         self.previous = {}
+        self.on_tensor = None
+        self.tensor_owners = {}
 
     def capture(self, roots):
         variables, storages, errors = [], {}, []
@@ -47,6 +49,13 @@ class TensorInventory:
                                stride=list(value.stride()), requires_grad=value.requires_grad,
                                grad_fn=type(value.grad_fn).__name__ if value.grad_fn is not None else None,
                                is_parameter=isinstance(value, self.torch.nn.Parameter))
+                    if path.startswith('autograd_saved.'):
+                        row['saved_for_backward'] = True
+                        row['saved_owner'] = path.split('.')[1]
+                    if id(value) in self.tensor_owners:
+                        row['memory_owner'] = self.tensor_owners[id(value)]
+                    if self.on_tensor:
+                        self.on_tensor(value, row)
                     variables.append(row)
                     entry = storages.setdefault(key, dict(storage_id=key, bytes=size, aliases=[]))
                     entry["aliases"].append(path)
@@ -103,7 +112,8 @@ class TensorInventory:
 
 
 class LayerMemoryTrace:
-    def __init__(self, torch, device, model, directory, variable_details=True, trace_roots=None):
+    def __init__(self, torch, device, model, directory, variable_details=True, trace_roots=None,
+                 algorithm=False, rules=None):
         self.torch, self.device = torch, device
         self.path = Path(directory)
         self.stream = (self.path / 'memory-events.jsonl').open('w')
@@ -114,16 +124,34 @@ class LayerMemoryTrace:
         self.variable_peak = None
         self.stage_resolver = StageResolver()
         self.stage_summary = StageMemorySummary()
+        self.algorithm_summary = None
+        self.saved_memory = None
+        self.optimizer_refs = {}
+        self.baseline_refs = {}
+        if algorithm:
+            if not variable_details:
+                raise ValueError('Algorithm attribution requires variable inventory.')
+            from memory_algorithm_summary import AlgorithmMemorySummary, load_rules
+            from .saved_memory import SavedMemory
+            self.algorithm_summary = AlgorithmMemorySummary(load_rules(rules))
+            self.saved_memory = SavedMemory(torch, self.saved_owner)
+            self.inventory.on_tensor = self.observe_baseline
         self.scopes = []
         self.closed = False
         self.trace_roots = tuple(Path(p).resolve() for p in (trace_roots or [Path(__file__).resolve().parents[1]]))
         self.excluded_files = {str(Path(__file__).resolve()),
                                str(Path(__file__).with_name('memory_analysis.py').resolve()),
-                               str(Path(__file__).resolve().parents[1] / 'memory_stage_summary.py')}
+                               str(Path(__file__).resolve().parents[1] / 'memory_stage_summary.py'),
+                               str(Path(__file__).resolve().parents[1] / 'memory_algorithm_summary.py'),
+                               str(Path(__file__).with_name('saved_memory.py').resolve())}
         self.model_files = set()
         self.layers = {}
         for name, module in model.named_modules():
             self.layers[id(module)] = name or 'model'
+            if self.saved_memory:
+                for value in vars(module).values():
+                    if isinstance(value, torch.optim.Optimizer):
+                        self.optimizer_refs[id(value)] = weakref.ref(value)
             try:
                 self.model_files.add(str(Path(inspect.getfile(type(module))).resolve()))
             except (TypeError, OSError):
@@ -145,6 +173,29 @@ class LayerMemoryTrace:
             if param.requires_grad:
                 owner = name.rsplit('.', 1)[0] if '.' in name else 'model'
                 self.handles.append(param.register_hook(self.gradient_hook(owner, name)))
+
+    def observe_baseline(self, tensor, row):
+        import fnmatch
+        path = row['path']
+        baseline = path.startswith('baseline_input.') or any(
+            r['category'] == 'model_baseline' and fnmatch.fnmatchcase(path, r['pattern'])
+            for r in self.algorithm_summary.rules)
+        if baseline:
+            row['baseline_storage'] = True
+            self.baseline_refs[id(tensor)] = weakref.ref(tensor)
+
+    def saved_owner(self):
+        from memory_algorithm_summary import layer_name
+        frame = sys._getframe().f_back
+        try:
+            while frame is not None:
+                name = self.layers.get(id(frame.f_locals.get('self')))
+                if name and layer_name(name) != 'shared':
+                    return layer_name(name)
+                frame = frame.f_back
+            return 'shared'
+        finally:
+            del frame
 
     def select_file(self, filename):
         path = Path(filename).resolve()
@@ -185,7 +236,8 @@ class LayerMemoryTrace:
         location = dict(location)
         location['stage_context'] = (dict(self.scopes[-1]) if self.scopes else
                                      self.stage_resolver.resolve(frame, location, self.layers))
-        stage_context = (self.previous or location)['stage_context']
+        stage_context = (location if location.get('event') == 'parameter_gradient_ready'
+                         else self.previous or location)['stage_context']
         t, d = self.torch, self.device
         t.cuda.synchronize(d)
         allocated = t.cuda.memory_allocated(d)
@@ -198,18 +250,62 @@ class LayerMemoryTrace:
                    interval_peak_allocated_bytes=peak_a, interval_peak_reserved_bytes=peak_r)
         if self.inventory is not None:
             roots = [('model', self.model_ref())]
+            if self.saved_memory:
+                from memory_algorithm_summary import layer_name
+                self.inventory.tensor_owners = {}
+                for name, parameter in self.model_ref().named_parameters():
+                    owner = layer_name(name)
+                    self.inventory.tensor_owners[id(parameter)] = owner
+                    if parameter.grad is not None:
+                        self.inventory.tensor_owners[id(parameter.grad)] = owner
+                # BP optimizer lives outside model; register it from frame locals
+                # below and keep only weak references between boundaries.
+                for key, ref in list(self.baseline_refs.items()):
+                    tensor = ref()
+                    if tensor is None:
+                        del self.baseline_refs[key]
+                    else:
+                        roots.append(('baseline_input.{}'.format(key), tensor))
+                tensor = None
             ancestor, depth = frame, 0
             while ancestor is not None:
                 filename = ancestor.f_code.co_filename.replace('\\', '/')
                 if self.select_file(filename):
                     for name, value in ancestor.f_locals.items():
                         roots.append(('frame{}.{}.{}'.format(depth, ancestor.f_code.co_name, name), value))
+                        if self.saved_memory and isinstance(value, self.torch.optim.Optimizer):
+                            self.optimizer_refs[id(value)] = weakref.ref(value)
                 ancestor, depth = ancestor.f_back, depth + 1
+            if self.saved_memory:
+                roots.extend(self.saved_memory.roots())
+                for key, ref in list(self.optimizer_refs.items()):
+                    optimizer = ref()
+                    if optimizer is not None:
+                        roots.append(('tracked_optimizer{}'.format(key), optimizer))
+                        for parameter, state in optimizer.state.items():
+                            owner = self.inventory.tensor_owners.get(id(parameter), 'shared')
+                            def assign(value):
+                                if self.torch.is_tensor(value):
+                                    self.inventory.tensor_owners[id(value)] = owner
+                                elif isinstance(value, dict):
+                                    for child in value.values(): assign(child)
+                                elif isinstance(value, (list, tuple)):
+                                    for child in value: assign(child)
+                            assign(state)
+                    else:
+                        del self.optimizer_refs[key]
+                optimizer = None  # only weak references survive the snapshot
             roots.extend(extra_roots or [])
+            if self.saved_memory and location.get('event') == 'parameter_gradient_ready':
+                for name, tensor in extra_roots or []:
+                    self.inventory.tensor_owners[id(tensor)] = layer_name(str(location.get('layer', '')))
             details = self.inventory.capture(roots)
             del roots, ancestor
             details.update(sequence=self.count, end=location, stage_context=stage_context)
             self.stage_summary.observe(row, details, stage_context)
+            if self.algorithm_summary:
+                snapshot = self.algorithm_summary.observe(row, details, stage_context)
+                row['algorithm_observed_bytes'] = snapshot['algorithm_bytes']
             details['allocator_minus_visible_storage_bytes'] = allocated - details['unique_storage_bytes']
             self.variable_stream.write(json.dumps(details) + '\n')
             self.variable_stream.flush()
@@ -268,6 +364,8 @@ class LayerMemoryTrace:
             raise RuntimeError('Run memory tracing without an existing Python debugger/trace.')
         self.active = True
         self.boundary({'event': 'start', 'phase': 'before_gpu_transfer'}, frame=sys._getframe(1))
+        if self.saved_memory:
+            self.saved_memory.start()
         sys.settrace(self.trace)
 
     def end_window(self, name):
@@ -283,6 +381,8 @@ class LayerMemoryTrace:
         if self.active:
             sys.settrace(self.old_trace)
             self.active = False
+        if self.saved_memory:
+            self.saved_memory.close()
         for handle in self.handles:
             handle.remove()
         self.handles.clear()
@@ -290,6 +390,12 @@ class LayerMemoryTrace:
         if self.variable_stream is not None:
             self.variable_stream.close()
             self.stage_summary.write(self.path)
+            if self.algorithm_summary:
+                self.algorithm_summary.write(self.path)
+                target = self.path / 'algorithm-memory-summary.json'
+                data = json.loads(target.read_text())
+                data['complete'] = bool(self.previous and self.previous.get('phase') == 'analysis_end')
+                target.write_text(json.dumps(data, indent=2) + '\n')
         summary = dict(events=self.count, whole_peak=self.maximum,
                        largest_observed_boundary_storages=self.variable_peak,
                        interval_peaks_by_layer_bytes=self.by_layer,
