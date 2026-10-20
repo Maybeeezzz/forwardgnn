@@ -101,6 +101,30 @@ def fake_torch():
 
 
 class InventoryTests(unittest.TestCase):
+    def test_compact_preserves_summaries_without_event_logs(self):
+        from memory_algorithm_summary import AlgorithmMemorySummary
+        outputs = []
+        for mode in ('full', 'compact'):
+            with tempfile.TemporaryDirectory() as directory:
+                torch, model = fake_torch(), Module()
+                model.weight = Parameter(Storage(1, 16))
+                tracer = module.LayerMemoryTrace(torch, Device(), model, directory, output_mode=mode)
+                tracer.algorithm_summary = AlgorithmMemorySummary([])
+                tracer.boundary({'event': 'before', 'phase': 'forward', 'layer': 0})
+                model.weight = None
+                torch.cuda.allocated = 112
+                tracer.boundary({'event': 'after', 'phase': 'analysis_end'})
+                tracer.close()
+                path = Path(directory)
+                for filename in ('memory-events.jsonl', 'memory-variables.jsonl'):
+                    self.assertEqual((path/filename).exists(), mode == 'full')
+                data = json.loads((path/'algorithm-memory-summary.json').read_text())
+                self.assertTrue(data.pop('complete'))
+                self.assertEqual(data.pop('output_mode'), mode)
+                outputs.append((data, (path/'memory-stage-summary.json').read_text(),
+                                (path/'algorithm-memory-stages.csv').read_text()))
+        self.assertEqual(outputs[0], outputs[1])
+
     def test_aliases_resize_disappearance_and_no_retention(self):
         inventory = module.TensorInventory(fake_torch(), Device())
         backing = Storage(1, 64)

@@ -113,14 +113,17 @@ class TensorInventory:
 
 class LayerMemoryTrace:
     def __init__(self, torch, device, model, directory, variable_details=True, trace_roots=None,
-                 algorithm=False, rules=None):
+                 algorithm=False, rules=None, output_mode='full'):
         self.torch, self.device = torch, device
         self.path = Path(directory)
-        self.stream = (self.path / 'memory-events.jsonl').open('w')
+        if output_mode not in ('full', 'compact'):
+            raise ValueError('Unknown memory output mode: '+str(output_mode))
+        self.output_mode = output_mode
+        self.stream = (self.path / 'memory-events.jsonl').open('w') if output_mode == 'full' else None
         self.model_ref = weakref.ref(model)
         self.inventory = TensorInventory(torch, device) if variable_details else None
         self.variable_stream = ((self.path / 'memory-variables.jsonl').open('w')
-                                if variable_details else None)
+                                if variable_details and output_mode == 'full' else None)
         self.variable_peak = None
         self.stage_resolver = StageResolver()
         self.stage_summary = StageMemorySummary()
@@ -312,8 +315,9 @@ class LayerMemoryTrace:
                 snapshot = self.algorithm_summary.observe(row, details, stage_context)
                 row['algorithm_observed_bytes'] = snapshot['algorithm_bytes']
             details['allocator_minus_visible_storage_bytes'] = allocated - details['unique_storage_bytes']
-            self.variable_stream.write(json.dumps(details) + '\n')
-            self.variable_stream.flush()
+            if self.variable_stream is not None:
+                self.variable_stream.write(json.dumps(details) + '\n')
+                self.variable_stream.flush()
             row['visible_unique_storage_bytes'] = details['unique_storage_bytes']
             row['allocator_minus_visible_storage_bytes'] = details['allocator_minus_visible_storage_bytes']
             row['appeared_visible_storage_bytes'] = sum(x['bytes'] for x in details['appeared_storages'])
@@ -340,8 +344,9 @@ class LayerMemoryTrace:
             self.best = row
         self.top.append(row)
         self.top = sorted(self.top, key=lambda r: r['interval_peak_allocated_bytes'], reverse=True)[:20]
-        self.stream.write(json.dumps(row) + '\n')
-        self.stream.flush()
+        if self.stream is not None:
+            self.stream.write(json.dumps(row) + '\n')
+            self.stream.flush()
         self.count += 1
         self.previous, self.last_allocated, self.last_reserved = location, allocated, reserved
         t.cuda.reset_peak_memory_stats(d)
@@ -391,17 +396,20 @@ class LayerMemoryTrace:
         for handle in self.handles:
             handle.remove()
         self.handles.clear()
-        self.stream.close()
+        if self.stream is not None:
+            self.stream.close()
         if self.variable_stream is not None:
             self.variable_stream.close()
+        if self.inventory is not None:
             self.stage_summary.write(self.path)
             if self.algorithm_summary:
                 self.algorithm_summary.write(self.path)
                 target = self.path / 'algorithm-memory-summary.json'
                 data = json.loads(target.read_text())
+                data['output_mode'] = self.output_mode
                 data['complete'] = bool(self.previous and self.previous.get('phase') == 'analysis_end')
                 target.write_text(json.dumps(data, indent=2) + '\n')
-        summary = dict(events=self.count, whole_peak=self.maximum,
+        summary = dict(events=self.count, output_mode=self.output_mode, whole_peak=self.maximum,
                        largest_observed_boundary_storages=self.variable_peak,
                        interval_peaks_by_layer_bytes=self.by_layer,
                        largest_peak_interval=self.best, top_peak_intervals=self.top,
@@ -443,4 +451,8 @@ class LayerMemoryTrace:
                       'Disappeared means no longer visible to this inventory, NOT proven allocator free.',
                       'Transient interval peaks can exceed boundary observations; native/autograd tensors may be invisible.',
                       'Storage identities may be reused between observations; transitions are not allocation histories.']
+        if self.output_mode == 'compact':
+            lines = [line for line in lines if 'memory-events.jsonl' not in line and 'memory-variables.jsonl' not in line]
+            lines += ['', 'Compact output: no per-event JSONL; stage summaries and selected peak snapshots only.',
+                      'Sampling/attribution is unchanged. Full variable histories cannot be reconstructed from this output.']
         (self.path / 'memory-trace-report.md').write_text('\n'.join(lines) + '\n')

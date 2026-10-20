@@ -14,6 +14,82 @@ import compare_algorithm_memory_matrix as matrix
 
 
 class MatrixTests(unittest.TestCase):
+    def complete_run(self, case, name='run0-fixture'):
+        folder = Path(case['memory_directory'])/name
+        folder.mkdir(parents=True)
+        command = case['command']
+        args = {'run_i': 0}
+        for flag in ('dataset', 'model', 'task', 'num-layers', 'num-hidden', 'num-runs',
+                     'seed', 'epochs', 'lr', 'patience', 'val-every', 'append-label',
+                     'aug-edge-direction', 'temperature'):
+            if '--'+flag in command:
+                value = command[command.index('--'+flag)+1]
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    pass
+                args[flag.replace('-', '_')] = None if value == 'none' else value
+        matrix.save(folder/'memory-run.json', {'arguments': args})
+        rules = json.loads(Path(command[command.index('--memory-analysis-rules')+1]).read_text())
+        matrix.save(folder/'algorithm-memory-summary.json',
+                    dict(schema_version=2, complete=True, rules=rules,
+                         period_peaks={'training': {}}, global_peak={}))
+        (folder/'algorithm-memory-stages.csv').write_text('period,stage\ntraining,forward\n')
+        return folder
+
+    def test_resume_validates_results_and_dry_run_is_read_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            argv = ['--output', d, '--architectures', 'SAGE', '--depths', '16']
+            plan = matrix.build_plan(matrix.parse_args(argv))
+            matrix.save(Path(d)/'plan.json', plan)
+            complete = self.complete_run(plan['cases'][0])
+            partial = self.complete_run(plan['cases'][0], 'run0-zpartial')
+            (partial/'algorithm-memory-summary.json').write_text('{"complete":false}')
+            before = (Path(d)/'plan.json').read_bytes()
+            with patch.object(matrix.subprocess, 'run', side_effect=AssertionError('No training')), contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(matrix.main(argv+['--resume', '--dry-run']), 0)
+            cases = json.loads(out.getvalue())['cases']
+            self.assertEqual([c['action'] for c in cases], ['skip', 'run'])
+            self.assertEqual(cases[0]['selected_runs']['0'], str(complete))
+            self.assertEqual((Path(d)/'plan.json').read_bytes(), before)
+            self.assertFalse((Path(d)/'process-status.json').exists())
+            metadata = json.loads((complete/'memory-run.json').read_text())
+            metadata['arguments']['epochs'] = 999
+            matrix.save(complete/'memory-run.json', metadata)
+            with self.assertRaises(ValueError):
+                matrix.read_run(plan['cases'][0], 0, validate=True)
+            with self.assertRaises(ValueError):
+                a = matrix.parse_args(argv+['--resume', '--epochs', '4'])
+                matrix.resume_plan(a, matrix.build_plan(a))
+
+    def test_atomic_save_and_attempt_isolation(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d)/'status.json'
+            matrix.save(path, {'status': 'old'})
+            with patch.object(matrix.os, 'replace', side_effect=OSError(28, 'No space left on device')):
+                with self.assertRaises(OSError):
+                    matrix.save(path, {'status': 'new'})
+            self.assertEqual(json.loads(path.read_text()), {'status': 'old'})
+            self.assertFalse(path.with_name('status.json.tmp').exists())
+            case = matrix.build_plan(matrix.parse_args(['--output', d]))['cases'][0]
+            original = case['memory_directory']
+            matrix.isolate_attempt(case, 'test')
+            self.assertEqual(case['memory_directory'], original)
+            self.assertIn(original+'/attempt-test', case['command'])
+            self.assertTrue(case['log'].endswith('sf-process-test.log'))
+
+    def test_worker_disk_exhaustion_stops_matrix(self):
+        with tempfile.TemporaryDirectory() as d:
+            def failed_worker(command, **kwargs):
+                kwargs['stdout'].write('OSError: [Errno 28] No space left on device\n')
+                return SimpleNamespace(returncode=120)
+            with patch.object(matrix.subprocess, 'run', side_effect=failed_worker) as worker, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(matrix.main(['--output', d]), 2)
+            self.assertEqual(worker.call_count, 1)
+            statuses = json.loads((Path(d)/'process-status.json').read_text())
+            self.assertEqual(statuses[0]['status'], 'failed')
+            self.assertTrue(all(s['status'] == 'pending' for s in statuses[1:]))
+
     def test_default_commands_isolated_and_paired(self):
         a=matrix.parse_args(['--output','/tmp/memory-matrix-fixture'])
         p=matrix.build_plan(a)

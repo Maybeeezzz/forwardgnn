@@ -20,6 +20,7 @@
 |预算|3 epochs；lr=0.001；patience=-1；val-every=1|
 |SF 专有参数|append-label=none、aug-edge-direction=bidirection、temperature=1.0|
 |统计|memory-analysis-algorithm；configs/memory/sf.json 与 bp.json|
+|输出|默认 compact，仅阶段汇总、峰值快照及少量运行元数据，不写逐事件 JSONL|
 
 默认 24 个训练进程、24 个 run，组成 12 组 SF/BP 对照。`--runs 5` 时仍是 24 个训练进程，每个进程执行 5 次运行，共 120 个 run；每个 run_i 独立配对汇总，不只选择最后一次。
 
@@ -71,6 +72,51 @@ bash exp/compare-algorithm-memory/run.sh \
 ```
 
 该扩展为 120 个训练进程、600 个 run。3 epochs 用于显存筛查，不表示准确率收敛，也不表示覆盖完整训练的所有后期峰值。
+
+## 断点续跑：已有矩阵只补 SAGE 16 层和 GAT
+
+在原输出目录上加 `--resume`，保持原矩阵的完整参数。不要将 architectures/depths 改成子集：调度器会自行查找完整结果并跳过，最终统一生成全矩阵对比。
+
+先预览（只读，不启动训练、不写文件）；每个 case 的 `action` 为 `skip` 或 `run`：
+
+```bash
+cd ~/forwardgnn
+conda activate ForwardLearningGNN
+bash exp/compare-algorithm-memory/run.sh \
+  --datasets Amazon-Photo --architectures GCN SAGE GAT \
+  --depths 2 4 8 16 --hidden 128 --runs 1 --seed 100 \
+  --epochs 3 --lr 0.001 --patience -1 --val-every 1 \
+  --gpu 0 --memory-output compact --resume \
+  --output results/algorithm-memory-matrix --dry-run
+```
+
+确认后实际续跑：
+
+```bash
+bash exp/compare-algorithm-memory/run.sh \
+  --datasets Amazon-Photo --architectures GCN SAGE GAT \
+  --depths 2 4 8 16 --hidden 128 --runs 1 --seed 100 \
+  --epochs 3 --lr 0.001 --patience -1 --val-every 1 \
+  --gpu 0 --memory-output compact --resume \
+  --output results/algorithm-memory-matrix
+```
+
+已提供结果的只读检查为跳过 14 个配置，运行 10 个：SAGE 16 层 SF/BP，以及 GAT 2/4/8/16 层 SF/BP。服务器实际行为取决于该目录当前完整结果。
+
+完成判断检查所有 run 的 `complete`、schema、训练参数、归因规则、峰值和阶段表，不仅检查目录或进程退出状态。新旧 full/compact 结果可以一起汇总。任一 run 不完整时重跑该配置的全部 runs；不会从某个 epoch 或某一层恢复训练。
+
+续跑日志及结果放入带时间戳的新文件/`attempt-*` 子目录，保留旧失败结果。原 `plan.json` 保留；本次计划写入 `resume-plan-*.json`，旧进程状态备份为 `process-status-before-*.json`。可多次 `--resume`。GPU、解释器、输出所在路径及输出精简程度可以变化，训练配置必须匹配原计划。
+
+## 精简模式的内容和限制
+
+矩阵入口默认 `--memory-output compact`；单独调用训练入口需显式加 `--memory-analysis-output compact`（并启用 `--memory-analysis`）。
+
+- 保留 `memory-stage-summary.{json,csv,md}`、`algorithm-memory-summary.json`、`algorithm-memory-stages.csv`、算法报告以及 `memory-trace-summary.json`/报告；算法统计需启用算法分析。
+- 保留训练/评估峰值、各层各阶段分类汇总和选中峰值处的 storage/变量别名。采样、storage 去重、归因口径不变。
+- 不生成 `memory-events.jsonl`、`memory-variables.jsonl`；无法事后逐事件查询变量释放，也无法从原始事件重新归因。需要这些功能时选 `--memory-output full`。
+- compact 不支持算子 profiler 模式；普通训练日志和运行参数元数据仍保留。输出大小随层数/峰值快照规模增长，并非固定大小；追踪计算开销仍存在。
+
+精简模式只减少新输出，不自动删除旧的巨大 JSONL，也不会立即腾出磁盘空间。运行前仍需保证结果盘有可用空间。
 
 ## 与论文预算的关系
 
@@ -125,7 +171,7 @@ PY
 
 ## 失败、输出与测量边界
 
-输出目录必须新建或为空；不存在静默覆盖或自动续跑。训练结果也隔离在 output 内，不写旧的 algorithm-memory-sf/bp 目录。默认遇到非零退出（包括 OOM）记录日志并继续其余配置；`--fail-fast` 可提前停止。失败不伪装成零，缺少任一侧完整结果的配对不进入数值表，见 pair-status.json。任一配对失败，调度器最终退出码为 1；Ctrl-C 保存进程状态并以 130 退出，不启动后续实验。
+首次运行的输出目录必须新建或为空；已有目录必须显式使用 `--resume`。训练结果隔离在 output 内。默认遇到非零退出（包括 OOM）记录日志并继续其余配置；`--fail-fast` 可提前停止。磁盘空间/配额耗尽时停止调度，修复空间后可续跑；状态文件采用临时文件替换，避免写满时截断上次状态。失败会在终端显示日志尾部。失败不伪装成零，缺少任一侧完整结果的配对不进入数值表，见 pair-status.json。任一配对失败，调度器最终退出码为 1；控制器错误为 2；Ctrl-C 保存进程状态并以 130 退出，不启动后续实验。
 
 主指标是按 storage 去重的训练保留存储观测峰值，不是精确因果额外显存。模型参数/原始数据基线排除；未观测的原生临时空间不归因。评估总量仍包含常驻训练状态。即使排除了模型临时空间，实际 CUDA 执行仍会产生该空间，因此深层模型仍可能 OOM。详见[统计口径](../../docs/algorithm_memory_analysis.md)。
 

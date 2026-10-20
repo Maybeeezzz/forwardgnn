@@ -15,6 +15,8 @@ def add_memory_arguments(parser):
     group = parser.add_argument_group('optional memory analysis')
     group.add_argument('--memory-analysis', action='store_true',
                        help='Enable CUDA boundary, variable/storage and stage diagnostics (default: off).')
+    group.add_argument('--memory-analysis-output', choices=['full', 'compact'], default='full',
+                       help='compact keeps summaries/peak snapshots without per-event JSONL (boundary mode only).')
     group.add_argument('--memory-analysis-algorithm', action='store_true',
                        help='Track autograd saved storage and algorithm attribution (boundary mode only).')
     group.add_argument('--memory-analysis-rules', default=None,
@@ -40,7 +42,7 @@ class MemoryAnalysis:
     def __init__(self, enabled=False, model=None, device=None, directory=None,
                  variable_details=True, trace_roots=None, operators=False,
                  target_module=None, target_call=1, record_shapes=False, tensor_ops=False,
-                 algorithm=False, rules=None, metadata=None):
+                 algorithm=False, rules=None, metadata=None, output_mode='full'):
         self.enabled = enabled
         self.model, self.device = model, device
         self.directory = Path(directory) if directory is not None else None
@@ -50,12 +52,15 @@ class MemoryAnalysis:
         self.operators = operators
         self.algorithm, self.rules = algorithm, rules
         self.metadata = metadata or {}
+        self.output_mode = output_mode
         self.operator_options = dict(target_module=target_module, target_call=target_call,
                                      record_shapes=record_shapes, tensor_ops=tensor_ops)
 
     def __enter__(self):
         if not self.enabled:
             return self
+        if self.output_mode not in ('full', 'compact') or (self.output_mode == 'compact' and self.operators):
+            raise ValueError('Compact output requires boundary mode.')
         if self.algorithm and (self.operators or not self.variable_details):
             raise ValueError('Algorithm attribution requires boundary mode with variable inventory.')
         import torch
@@ -72,7 +77,7 @@ class MemoryAnalysis:
         import json
         (self.directory / 'memory-run.json').write_text(json.dumps(dict(
             arguments=self.metadata, torch_version=getattr(torch, "__version__", "unknown"),
-            device=str(device), attribution='algorithm' if self.algorithm else 'standard'),
+            device=str(device), output_mode=self.output_mode, attribution='algorithm' if self.algorithm else 'standard'),
             indent=2, default=str) + '\n')
         try:
             if self.operators:
@@ -84,7 +89,7 @@ class MemoryAnalysis:
                 from .layer_memory_trace import LayerMemoryTrace
                 self.tracer = LayerMemoryTrace(torch, device, self.model, self.directory,
                                                variable_details=self.variable_details, trace_roots=self.trace_roots,
-                                               algorithm=self.algorithm, rules=self.rules)
+                                               algorithm=self.algorithm, rules=self.rules, output_mode=self.output_mode)
                 torch.cuda.synchronize(device)
                 torch.cuda.reset_peak_memory_stats(device)
                 self.tracer.start()
@@ -128,6 +133,9 @@ def memory_analysis(args, model, run_i=0):
     operators = getattr(args, 'memory_analysis_operators', False)
     algorithm = getattr(args, 'memory_analysis_algorithm', False)
     rules = getattr(args, 'memory_analysis_rules', None)
+    output_mode = getattr(args, 'memory_analysis_output', 'full')
+    if output_mode == 'compact' and (operators or not getattr(args, 'memory_analysis', False)):
+        raise ValueError('--memory-analysis-output compact requires --memory-analysis without operator mode.')
     if algorithm and (not getattr(args, 'memory_analysis', False) or operators
                       or getattr(args, 'memory_analysis_no_variables', False)):
         raise ValueError('--memory-analysis-algorithm requires --memory-analysis with variables and no operator mode.')
@@ -150,4 +158,4 @@ def memory_analysis(args, model, run_i=0):
                           target_call=getattr(args, 'memory_analysis_call', 1),
                           record_shapes=getattr(args, 'memory_analysis_record_shapes', False),
                           tensor_ops=getattr(args, 'memory_analysis_tensor_ops', False),
-                          algorithm=algorithm, rules=rules, metadata=dict(vars(args), run_i=run_i))
+                          algorithm=algorithm, rules=rules, metadata=dict(vars(args), run_i=run_i), output_mode=output_mode)

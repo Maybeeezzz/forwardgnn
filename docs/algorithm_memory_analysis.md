@@ -108,3 +108,11 @@ BP 节点分类和链接预测的 `test()` 均使用 `@torch.no_grad()`，同时
 自定义显式 scope 可使用 `memory.stage('forward', period='other')` 标记层间转换。显式 forward/loss/backward/update scope 默认按训练归类，evaluation scope 按评估归类。
 
 旧 schema v1 日志不能可靠区分循环内训练 forward 和层间转换，比较工具会明确拒绝，而非自动猜测；历史结果不被修改。
+
+## 精简输出与矩阵续跑
+
+独立训练入口增加 `--memory-analysis-output compact`；矩阵入口默认使用 `--memory-output compact`。精简模式仍在每个原有边界执行变量枚举、storage 去重和算法归因，保留各层各阶段汇总及选中的峰值快照，但不写 `memory-events.jsonl` 和 `memory-variables.jsonl`。不能用精简结果恢复完整变量时间线或重新做事件归因；需要原始事件时使用 `full`。compact 不与算子 profiler 模式组合。
+
+训练和评估的峰值仍分开，指标仍是观测到的算法保留 storage，非完整原生临时分配峰值。普通训练日志、运行参数、汇总报告仍保留，旧日志不会自动删除。
+
+矩阵 `--resume` 校验已有结果的完成标记、训练参数、归因规则和阶段表，跳过完整配置；不完整配置在新 attempt 目录中从头运行。保持原矩阵参数，先用 `--resume --dry-run` 预览。完整服务器命令见 [矩阵实验说明](../exp/compare-algorithm-memory/README.md#断点续跑已有矩阵只补-sage-16-层和-gat)。
