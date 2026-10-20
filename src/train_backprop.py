@@ -171,6 +171,7 @@ class NodeClassificationTrainer:
 
         return train_time, epoch
 
+    @torch.no_grad()
     def test(self):
         model, data = self.model, self.data.to(self.device)
         model.eval()
@@ -271,6 +272,7 @@ class LinkPredictionTrainer:
 
         return train_time, epoch
 
+    @torch.no_grad()
     def test(self):
         model, test_data = self.model, self.test_data.to(self.device)
         model.eval()

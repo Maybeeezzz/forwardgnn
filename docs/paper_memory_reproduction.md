@@ -1,7 +1,7 @@
 # 沿用作者脚本条件的显存监控入口
 
 这是新增入口 `src/reproduce_paper_memory.py`，启动脚本为
-`exp/nodeclass/nodeclass-paper-memory.sh`。原论文模型、训练脚本和已有实验入口均不修改。
+`exp/nodeclass-paper-memory/run.sh`。原论文模型、训练脚本和已有实验入口均不修改。
 
 ## 保持的行为
 
@@ -31,20 +31,20 @@ GPU 编号可选；默认不提供训练预算覆盖参数。可选子集不会�
 
 ```bash
 # 仅检查计划，不需要 CUDA
-bash exp/nodeclass/nodeclass-paper-memory.sh \
+bash exp/nodeclass-paper-memory/run.sh \
   --output results/paper-memory-plan --dry-run
 
 # 单个数据集/算子的正式预算验证，依然五次运行、1000 epoch 上限和早停
-bash exp/nodeclass/nodeclass-paper-memory.sh --gpu 0 \
+bash exp/nodeclass-paper-memory/run.sh --gpu 0 \
   --datasets Amazon-Photo --architectures GCN \
   --output results/paper-memory-amazon-gcn
 
 # 全部节点分类 SF/BP 配置
-bash exp/nodeclass/nodeclass-paper-memory.sh --gpu 0 \
+bash exp/nodeclass-paper-memory/run.sh --gpu 0 \
   --output results/paper-memory
 
 # 同条件关闭监控的对照，可比较精度和原训练输出
-bash exp/nodeclass/nodeclass-paper-memory.sh --gpu 0 \
+bash exp/nodeclass-paper-memory/run.sh --gpu 0 \
   --datasets Amazon-Photo --architectures GCN --monitor none \
   --output results/paper-control-amazon-gcn
 ```

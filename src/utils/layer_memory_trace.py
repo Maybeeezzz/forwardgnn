@@ -204,9 +204,14 @@ class LayerMemoryTrace:
         return str(path) in self.model_files or any(path == root or root in path.parents for root in self.trace_roots)
 
     @contextmanager
-    def stage(self, name, layer=None, epoch=None):
+    def stage(self, name, layer=None, epoch=None, period=None):
         """Optional explicit labels for any algorithm; no tensor lifetime changes."""
-        context = dict(phase=name, layer=layer, epoch_zero_based=epoch)
+        if period is None:
+            period = ('evaluation' if name == 'evaluation' else
+                      'training' if name in ('forward', 'loss_build', 'backward', 'optimizer_step', 'zero_grad') else 'other')
+        if period not in ('training', 'evaluation', 'other', 'unclassified'):
+            raise ValueError('Unknown memory period: '+str(period))
+        context = dict(phase=name, layer=layer, epoch_zero_based=epoch, period=period)
         self.scopes.append(context)
         self.boundary({'event': 'stage_enter', 'phase': name}, frame=sys._getframe(2))
         try:
@@ -215,7 +220,7 @@ class LayerMemoryTrace:
             self.boundary({'event': 'stage_exit', 'phase': name}, frame=sys._getframe(2))
             self.scopes.pop()
             outer = (self.scopes[-1] if self.scopes else
-                     dict(phase='other', layer=None, epoch_zero_based=None))
+                     dict(phase='other', layer=None, epoch_zero_based=None, period='other'))
             self.previous = dict(self.previous, stage_context=dict(outer))
 
     def gradient_hook(self, layer, name):

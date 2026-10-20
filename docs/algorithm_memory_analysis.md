@@ -3,18 +3,19 @@
 从仓库根目录，在已有 CUDA/PyTorch/PyG 环境运行：
 
 ```bash
-bash scripts/compare_algorithm_memory.sh
-cat results/algorithm-memory-comparison/comparison.md
+bash exp/compare-algorithm-memory/run.sh --architectures SAGE --depths 2 \
+  --output results/algorithm-memory-matrix
+cat results/algorithm-memory-matrix/matrix-report.md
 ```
 
-脚本包含完整 SF、BP 命令，不依赖用户预设的环境变量。两层、hidden=128、Amazon-Photo、seed=100、3 epochs、关闭 early stopping。SF 是每层 3 epochs，BP 是全模型 3 epochs；它们不是等计算量或等准确率实验。SF 使用增广图、末层输出 128，BP 的分类输出为类别数 8；这些是仓库现有模型差异，本工具没有更改算法或将其伪装成同构对照。
+脚本现支持矩阵，默认 GCN/SAGE/GAT × 2/4/8/16 层；上面的命令显式选择两层 SAGE 回归配置。hidden=128、Amazon-Photo、seed=100、3 epochs、关闭 early stopping。完整参数与输出结构见 [实验说明](../exp/compare-algorithm-memory/README.md)。SF 是每层 3 epochs，BP 是全模型 3 epochs；它们不是等计算量或等准确率实验。SF 使用增广图、末层输出 128，BP 的分类输出为类别数 8；这些是仓库现有模型差异，本工具没有更改算法或将其伪装成同构对照。
 
 单独重建对比：
 
 ```bash
 python src/memory_algorithm_summary.py \
-  --sf results/algorithm-memory-sf \
-  --bp results/algorithm-memory-bp \
+  --sf results/algorithm-memory-matrix/Amazon-Photo/SAGE/layers-2/sf \
+  --bp results/algorithm-memory-matrix/Amazon-Photo/SAGE/layers-2/bp \
   --output results/algorithm-memory-comparison
 cat results/algorithm-memory-comparison/comparison.md
 ```
@@ -88,3 +89,22 @@ python -m unittest discover -s tests -p 'test_*memory*.py' -v
 ```
 
 含真实 autograd 梯度一致性/释放测试及 CUDA 端到端测试；缺少 PyTorch/CUDA 时相应测试跳过。
+
+## 分开统计训练与评估（schema v2）
+
+BP 节点分类和链接预测的 `test()` 均使用 `@torch.no_grad()`，同时保留 `model.eval()`。
+
+新日志将 `period` 独立于具体 `phase` 保存：
+
+- `training`：epoch 循环内的训练过程，以及反向梯度回调。
+- `evaluation`：测试/评估函数，或由 `val_`/`test_` 目标变量识别的验证调用；嵌套模型 forward 继承评估归类。
+- `other`：初始化、checkpoint、epoch 循环外的 SF 层间转换等。循环结束后残留的局部 `epoch` 变量不作为训练证据。
+- `unclassified`：调用方未提供区间标签；不会静默并入训练。自动阶段识别是针对现有训练代码的启发式识别，扩展新训练器时应检查标签。
+
+`algorithm-memory-summary.json` 的 `period_peaks` 保存各区间完整峰值快照；`global_peak` 仅作全程背景。新文件 `algorithm-memory-periods.csv` 和对比文件 `comparison-periods.csv` 汇总各区间；原有阶段表新增 `period` 列。未采集到某区间时输出空值/“未观测”，不会报告为 0。
+
+评估峰值仍包含评估时存活的训练遗留状态（梯度、优化器等），不能解释为评估新增分配；本次修复没有改变这些对象的生命周期。每个峰值的类别分解保留在 JSON 中。
+
+自定义显式 scope 可使用 `memory.stage('forward', period='other')` 标记层间转换。显式 forward/loss/backward/update scope 默认按训练归类，evaluation scope 按评估归类。
+
+旧 schema v1 日志不能可靠区分循环内训练 forward 和层间转换，比较工具会明确拒绝，而非自动猜测；历史结果不被修改。

@@ -13,7 +13,7 @@ The Twelfth International Conference on Learning Representations (ICLR) 2024.
 (d) The single-forward approach is extended to incorporate top-down signals.*
 
 ## Installation
-Running [install_packages.sh](install/install_packages.sh) sets up the conda environment named `ForwardLearningGNN` and installs required packages.
+Running [install_packages.sh](exp/install-packages/run.sh) sets up the conda environment named `ForwardLearningGNN` and installs required packages.
 
 ## Datasets
 Datasets used in the paper will be downloaded in the [`data`](./data/) folder when the code runs for the first time.
@@ -27,9 +27,9 @@ download them from
 place them in the [`datasplits`](./datasplits/) folder.
 
 ## How to Run
-Scripts in [`exp/nodeclass/`](./exp/nodeclass/) and [`exp/linkpred/`](./exp/linkpred/) can be used 
-to train GNNs using the proposed forward learning algorithms of ForwardGNN or backpropagation 
-for node classification and link prediction, respectively.
+All shell entry points are listed in [`exp/README.md`](./exp/README.md). Each experiment has its own
+directory containing `run.sh` and a `README.md` describing its configuration and outputs.
+These cover node classification, link prediction, memory diagnostics, CUDA validation and environment setup.
 
 ## Directory Structure
 * [`src/`](./src/): source code root directory

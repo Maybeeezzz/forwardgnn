@@ -54,7 +54,7 @@ SF 原训练器仍会在每层结束时测试，且第一层、层间过渡也�
 
 ## 执行
 
-使用仓库 `install/install_packages.sh` 对应环境，并提前放置作者发布的 datasplits。
+使用仓库 `exp/install-packages/run.sh` 对应环境，并提前放置作者发布的 datasplits。
 缺少划分时拒绝自动生成。数据本体仍由原 loader 下载/读取。
 每次使用新的 output 目录，以免混合不同预算、环境或源码。
 
@@ -68,7 +68,7 @@ CUDA 冒烟验证（检查日志、JSON、精度字段及两种方法均成功�
 
 ```bash
 conda activate ForwardLearningGNN
-bash exp/nodeclass/nodeclass-depth-memory.sh --gpu 0 \
+bash exp/nodeclass-depth-memory/run.sh --gpu 0 \
   --datasets Amazon-Photo --architectures GCN --depths 2 8 \
   --runs 1 --epochs 3 --output results/depth-smoke
 ```
@@ -76,14 +76,14 @@ bash exp/nodeclass/nodeclass-depth-memory.sh --gpu 0 \
 主实验（五个划分，共 240 个进程）：
 
 ```bash
-bash exp/nodeclass/nodeclass-depth-memory.sh --gpu 0 \
+bash exp/nodeclass-depth-memory/run.sh --gpu 0 \
   --runs 5 --output results/depth-main
 ```
 
 宽度与更多图的稳健性实验：
 
 ```bash
-bash exp/nodeclass/nodeclass-depth-memory.sh --gpu 0 --runs 5 --hidden 256 \
+bash exp/nodeclass-depth-memory/run.sh --gpu 0 --runs 5 --hidden 256 \
   --datasets CitationFull-CiteSeer CitationFull-Cora_ML CitationFull-PubMed Amazon-Photo GitHub \
   --output results/depth-width256
 ```
@@ -92,7 +92,7 @@ bash exp/nodeclass/nodeclass-depth-memory.sh --gpu 0 --runs 5 --hidden 256 \
 避免用浅层精度代表深层；按验证集选 checkpoint，不按测试集选择深度。
 
 ```bash
-bash exp/nodeclass/nodeclass-depth-memory.sh --gpu 0 --runs 5 \
+bash exp/nodeclass-depth-memory/run.sh --gpu 0 --runs 5 \
   --depths 4 16 32 64 --epochs 1000 --patience 100 --val-every 2 \
   --output results/depth-quality
 ```

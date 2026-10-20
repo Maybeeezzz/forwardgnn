@@ -98,11 +98,11 @@ class MemoryAnalysis:
         return self
 
     @contextmanager
-    def stage(self, name, layer=None, epoch=None):
+    def stage(self, name, layer=None, epoch=None, period=None):
         if self.tracer is None:
             yield
         else:
-            with self.tracer.stage(name, layer=layer, epoch=epoch):
+            with self.tracer.stage(name, layer=layer, epoch=epoch, period=period):
                 yield
 
     def __exit__(self, exc_type, exc, traceback):

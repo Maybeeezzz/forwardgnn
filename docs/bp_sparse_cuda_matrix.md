@@ -1,6 +1,6 @@
 # CUDA BP SparseTensor 轻量矩阵
 
-入口 `src/test_bp_sparse_cuda.py`，启动脚本 `exp/bp-sparse-cuda-matrix.sh`。
+入口 `src/test_bp_sparse_cuda.py`，启动脚本 `exp/bp-sparse-cuda-matrix/run.sh`。
 本实验直接使用官方 PyG 模型和 `torch_sparse.SparseTensor`，不替换算子的聚合函数。
 不修改作者已有训练入口，也不依赖个人 GNN 仓库。它是内存机制实验，不能当作完整论文精度复现。
 
@@ -28,7 +28,7 @@ CUDA 11.7、PyG 2.2.0），并确认 torch_sparse 可以导入。
 ```bash
 cd /path/to/forwardgnn
 conda activate ForwardLearningGNN
-bash exp/bp-sparse-cuda-matrix.sh --gpu 0
+bash exp/bp-sparse-cuda-matrix/run.sh --gpu 0
 ```
 
 先运行单配置小预算：

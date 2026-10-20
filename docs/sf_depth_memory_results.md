@@ -113,7 +113,7 @@ split0～split4 的训练索引文件均被报告缺失。检查在遇到第一�
 此错误由实验入口要求使用预先提供的作者划分触发，不是模型训练异常，也不是 CUDA OOM。补齐划分后，从服务器仓库根目录执行：
 
 ```bash
-bash exp/nodeclass/nodeclass-depth-memory.sh \
+bash exp/nodeclass-depth-memory/run.sh \
   --gpu 0 --runs 5 --datasets GitHub \
   --output results/depth-github
 ```

@@ -12,7 +12,7 @@
   GCNConv 根据输入类型选择其官方 fused `message_and_aggregate` / SpMM 路径。
 - 使用原 BP 的原始图，不添加 SF 虚拟节点。GCN 输出维度仍为类别数。
 - 支持节点分类 GCN；不将这项 SpMM 实验外推至 GAT。
-- 默认矩阵与作者 `exp/nodeclass/nodeclass-bp.sh` 的 GCN 子集一致：
+- 默认矩阵与作者 `exp/nodeclass-bp/run.sh` 的 GCN 子集一致：
   CitationFull-CiteSeer、CitationFull-Cora_ML、CitationFull-PubMed、Amazon-Photo、GitHub；
   1–4 层；每项五个划分；hidden=128；最多 1000 epoch；Adam lr=0.001、
   weight_decay=0.0005；每 2 epoch 验证；patience=100。
@@ -23,7 +23,7 @@
 
 ## 运行
 
-使用作者 `install/install_packages.sh` 所定义的环境（Python 3.8、PyTorch 1.13.1、
+使用作者 `exp/install-packages/run.sh` 所定义的环境（Python 3.8、PyTorch 1.13.1、
 CUDA 11.7、PyG 2.2.0），并确保安装匹配 PyTorch/CUDA 的 `torch_sparse`。
 应记录实际 GPU 型号；不同 GPU 的内存和时间不能直接解释为论文复现误差。
 
@@ -31,13 +31,13 @@ CUDA 11.7、PyG 2.2.0），并确保安装匹配 PyTorch/CUDA 的 `torch_sparse`
 
 ```bash
 conda activate ForwardLearningGNN
-bash exp/nodeclass/nodeclass-bp-sparse.sh --gpu 0
+bash exp/nodeclass-bp-sparse/run.sh --gpu 0
 ```
 
 在同一环境运行配对的 edge_index 基线（结果文件名区分 backend）：
 
 ```bash
-bash exp/nodeclass/nodeclass-bp-sparse.sh --gpu 0 --graph-backend edge-index
+bash exp/nodeclass-bp-sparse/run.sh --gpu 0 --graph-backend edge-index
 ```
 
 单配置、小预算检查（不能当作论文精度结果）：

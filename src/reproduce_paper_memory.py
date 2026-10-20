@@ -128,7 +128,7 @@ def main():
     save(output / 'plan.json', dict(configurations=configs, dry_run=args.dry_run,
         scope='Author node-classification SF/BP scripts; original five-run process lifecycle.',
         source_sha256={str(f.relative_to(ROOT)): hashlib.sha256(f.read_bytes()).hexdigest()
-                       for folder in ['src', 'exp/nodeclass'] for f in sorted((ROOT / folder).rglob('*'))
+                       for folder in ['src', 'exp'] for f in sorted((ROOT / folder).rglob('*'))
                        if f.is_file() and f.suffix in ('.py', '.sh')}))
     print('{} processes, each retaining the original 5-run loop'.format(len(configs)), flush=True)
     if args.dry_run:

@@ -13,15 +13,25 @@ LABELS = ('参数', '梯度', '优化器状态', '早停副本', '缓存', '图�
 class StageResolver:
     def __init__(self):
         self.statements = {}
+        self.training_lines = {}
+        self.validation_lines = {}
 
     def statement(self, filename, line):
         if filename not in self.statements:
             mapping = {}
+            training, validation = set(), set()
             try:
                 source = Path(filename).read_text()
                 tree = ast.parse(source)
                 # Only simple statements: a surrounding loop/if must not swallow its body.
                 for node in ast.walk(tree):
+                    if isinstance(node, (ast.For, ast.AsyncFor)) and any(
+                            isinstance(n, ast.Name) and n.id == 'epoch' for n in ast.walk(node.target)):
+                        training.update(range(node.lineno, node.end_lineno + 1))
+                    if isinstance(node, ast.Assign) and any(
+                            isinstance(n, ast.Name) and n.id.startswith(('val_', 'test_'))
+                            for target in node.targets for n in ast.walk(target)):
+                        validation.update(range(node.lineno, node.end_lineno + 1))
                     if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Expr, ast.Return)):
                         text = ast.get_source_segment(source, node) or ''
                         for index in range(node.lineno, node.end_lineno + 1):
@@ -29,6 +39,8 @@ class StageResolver:
             except (OSError, SyntaxError, UnicodeError):
                 pass
             self.statements[filename] = mapping
+            self.training_lines[filename] = training
+            self.validation_lines[filename] = validation
         return self.statements[filename].get(line, '')
 
     def resolve(self, frame, location, layers):
@@ -51,7 +63,12 @@ class StageResolver:
             frames.append(ancestor)
             ancestor = ancestor.f_back
         phase = location.get('phase', 'other')
-        if any(f.f_code.co_name in ('eval_model', 'evaluate', 'test', 'validation_step') for f in frames):
+        application_frames = [f for f in frames if self.selected(f.f_code.co_filename)]
+        for f in application_frames:
+            self.statement(f.f_code.co_filename, f.f_lineno)
+        validation = any(f.f_lineno in self.validation_lines.get(f.f_code.co_filename, ())
+                         for f in application_frames)
+        if validation or any(f.f_code.co_name in ('eval_model', 'evaluate', 'test', 'validation_step') for f in frames):
             phase = 'evaluation'
         elif phase != 'backward':
             for current in frames:
@@ -84,6 +101,18 @@ class StageResolver:
                 if phase != 'other':
                     break
         context['phase'] = phase
+        in_epoch_loop = any(f.f_lineno in self.training_lines.get(f.f_code.co_filename, ())
+                            for f in application_frames)
+        if phase == 'evaluation':
+            context['period'] = 'evaluation'
+        elif phase == 'checkpoint':
+            context['period'] = 'other'
+        elif phase == 'backward' or in_epoch_loop:
+            context['period'] = 'training'
+        else:
+            # Includes initialization and SF layer-transition forward outside
+            # the epoch loop. A lingering local epoch is not training evidence.
+            context['period'] = 'other'
         return context
 
     def selected(self, filename):
