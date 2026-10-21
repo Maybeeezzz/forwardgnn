@@ -10,7 +10,8 @@ from pathlib import Path
 import re
 
 ALGORITHM = ('gradients', 'optimizer_state', 'saved_for_backward', 'algorithm_data',
-             'algorithm_cache', 'objective', 'checkpoint')
+             'algorithm_cache', 'objective', 'checkpoint', 'local_heads', 'feedback_state',
+             'perturbation_state', 'parameter_backup', 'update_buffer')
 
 
 def layer_name(path):
@@ -30,6 +31,11 @@ def classify(details, rules):
         owners = set()
         for v in vs:
             path = v['path']
+            explicit = v.get('algorithm_category')
+            if explicit is not None:
+                if explicit not in ALGORITHM:
+                    raise ValueError('Invalid explicit algorithm category: '+str(explicit))
+                choices.append((-1, explicit, 'explicit algorithm-owned tensor'))
             owner = v.get('memory_owner') or v.get('saved_owner') or layer_name(path)
             if owner != 'shared':
                 owners.add(owner)
@@ -45,7 +51,9 @@ def classify(details, rules):
                     priority = {'model_baseline': 0, 'gradients': 1, 'optimizer_state': 1,
                                 'checkpoint': 1, 'algorithm_data': 2, 'algorithm_cache': 3,
                                 'objective': 4, 'saved_for_backward': 5}
-                    choices.append((priority[category], category, rule['pattern']))
+                    # An explicit override is needed for algorithm-owned Parameters/buffers.
+                    rank = -1 if rule.get('override_baseline') else priority.get(category, 2)
+                    choices.append((rank, category, rule['pattern']))
             if path.endswith('.grad') or path == 'incoming_gradient':
                 choices.append((1, 'gradients', 'gradient'))
             if '.state[' in path and ('optimizer' in path or "['exp_avg" in path):
@@ -77,6 +85,8 @@ class AlgorithmMemorySummary:
                   for c in ALGORITHM + ('model_baseline', 'model_forward_visible', 'unattributed_visible')}
         total = sum(totals[c] for c in ALGORITHM)
         period = context.get('period', 'unclassified')
+        if period == 'warmup':
+            self.period_peaks.setdefault('warmup', None)
         if period not in self.period_peaks:
             raise ValueError('Unknown memory period: '+str(period))
         snapshot = dict(sequence=event['sequence'], phase=context['phase'], period=period,
@@ -147,8 +157,8 @@ class AlgorithmMemorySummary:
                  '峰值是已观测存储峰值，未包含无法观测的 backward/optimizer 临时空间；不是完整因果额外峰值。',
                  'owner=all 是该时刻全模型，其他 owner 为存储归属层；shared 无法唯一分层。各行峰值不能相加。',
                  '未归因差额含模型算子 workspace、未观测训练临时空间和分配器取整，不归给任一方。', '',
-                 '|统计区间|执行层|阶段|存储归属|事件|算法峰值|梯度|优化器|autograd保留|专属数据|缓存|目标|早停|',
-                 '|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
+                 '|统计区间|执行层|阶段|存储归属|事件|算法峰值|'+'|'.join(ALGORITHM)+'|',
+                 '|---|---|---|---|---:|---:|'+'|'.join(['---:']*len(ALGORITHM))+'|']
         for row in rows:
             cells = [str(row[k]) for k in ('period','active_layer','phase','owner','sequence')]
             cells += ['{:.3f}'.format(row[k]) for k in ['algorithm_observed_peak_mib']+[c+'_mib' for c in ALGORITHM]]
@@ -162,6 +172,68 @@ def load_rules(path):
         if rule['category'] not in ALGORITHM + ('model_baseline',):
             raise ValueError('Invalid memory attribution category: '+rule['category'])
     return rules
+
+
+def peak_period_row(label, period, peak):
+    """All composition fields come from this one period-maximum snapshot."""
+    categories = {k: v/2**20 for k, v in (peak or {}).get('categories_bytes', {}).items()
+                  if k in ALGORITHM}
+    dominant = max(categories, key=categories.get) if any(categories.values()) else None
+    storages = [s for s in (peak or {}).get('storages', []) if s.get('category') in ALGORITHM]
+    owners = {}
+    for storage in storages:
+        owner = storage.get('owner', 'shared')
+        owners[owner] = owners.get(owner, 0)+storage['bytes']/2**20
+    top = [dict(mib=s['bytes']/2**20, category=s['category'], owner=s.get('owner', 'shared'),
+                aliases=s.get('aliases', [])[:3])
+           for s in sorted(storages, key=lambda s:s['bytes'], reverse=True)[:3]]
+    return dict(algorithm=label, period=period, observed=peak is not None,
+                algorithm_observed_peak_mib=peak['algorithm_bytes']/2**20 if peak else None,
+                sequence=peak.get('sequence') if peak else None,
+                active_layer=peak.get('active_layer') if peak else None,
+                phase=peak.get('phase') if peak else None,
+                epoch_zero_based=peak.get('epoch_zero_based') if peak else None,
+                dominant_category=dominant, dominant_category_mib=categories.get(dominant),
+                peak_categories_json=json.dumps(categories, sort_keys=True),
+                peak_owners_json=json.dumps(owners, sort_keys=True),
+                top_storages_json=json.dumps(top, ensure_ascii=False))
+
+
+def peak_location(row, prefix):
+    def display(key):
+        value = row.get(prefix+'_'+key)
+        return '未知' if value is None or value == '' else str(value)
+    return '{} / {} / epoch={} / event={}'.format(
+        display('layer'), display('phase'), display('epoch_zero_based'), display('sequence'))
+
+
+def peak_comparisons(period_rows):
+    """Pair independent SF/BP period maxima, never add layer/stage maxima."""
+    indexed = {(r['algorithm'], r['period']): r for r in period_rows}
+    result = []
+    for period in ('training', 'evaluation'):
+        sf, bp = indexed.get(('SF', period), {}), indexed.get(('BP', period), {})
+        def value(row):
+            return (float(row['algorithm_observed_peak_mib'])
+                    if row.get('observed') in (True, 'True') else None)
+        s, b = value(sf), value(bp)
+        both = s is not None and b is not None
+        row = dict(period=period, sf_peak_mib=s, bp_peak_mib=b,
+                           saved_mib=b-s if both else None,
+                           saving_percent=100*(b-s)/b if both and b > 0 else None,
+                           sf_to_bp_ratio=s/b if both and b > 0 else None,
+                           sf_layer=sf.get('active_layer', ''), sf_phase=sf.get('phase', ''),
+                           bp_layer=bp.get('active_layer', ''), bp_phase=bp.get('phase', ''))
+        for prefix, source in (('sf',sf), ('bp',bp)):
+            for key in ('epoch_zero_based','sequence','dominant_category','dominant_category_mib',
+                        'peak_categories_json','peak_owners_json','top_storages_json'):
+                row[prefix+'_'+key] = source.get(key)
+        for key in ('layer','phase'):
+            left, right = row['sf_'+key], row['bp_'+key]
+            known = both and left not in (None,'','shared','other','unclassified') and right not in (None,'','shared','other','unclassified')
+            row[key+'_comparison'] = ('same' if left == right else 'different') if known else 'unknown'
+        result.append(row)
+    return result
 
 
 def main():
@@ -184,10 +256,7 @@ def main():
             parser.error('Legacy trace lacks reliable period attribution; rerun with updated code: '+str(file))
         sources[label] = str(file)
         for period, period_peak in payload['period_peaks'].items():
-            period_rows.append(dict(algorithm=label, period=period, observed=period_peak is not None,
-                algorithm_observed_peak_mib=period_peak['algorithm_bytes']/2**20 if period_peak else None,
-                sequence=period_peak['sequence'] if period_peak else None,
-                phase=period_peak['phase'] if period_peak else None))
+            period_rows.append(peak_period_row(label, period, period_peak))
         for period, peak in payload['period_peaks'].items():
             if peak is None:
                 print('{} {}: not observed'.format(label, period))
@@ -199,11 +268,37 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     with (args.output/'comparison.csv').open('w', newline='') as f:
         if rows:
-            w=csv.DictWriter(f,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
+            fields = list(dict.fromkeys(key for row in rows for key in row))
+            w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(rows)
     with (args.output/'comparison-periods.csv').open('w', newline='') as f:
         w=csv.DictWriter(f,fieldnames=list(period_rows[0]));w.writeheader();w.writerows(period_rows)
     (args.output/'sources.json').write_text(json.dumps(sources,indent=2)+'\n')
+    comparison = peak_comparisons(period_rows)
+    with (args.output/'comparison-peaks.csv').open('w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=list(comparison[0])); w.writeheader(); w.writerows(comparison)
     lines = ['# SF / BP 算法保留显存对比', '',
+             '节省量 = BP 峰值 − SF 峰值；节省比例 = (BP − SF) / BP。负值表示 SF 更高。',
+             '同一统计区间分别取各自全模型峰值，不要求峰值发生在相同层/阶段；不比较模型算子临时空间。', '',
+             '|统计区间|SF 峰值 MiB|BP 峰值 MiB|SF 节省 MiB|SF 节省 %|SF 峰值位置|BP 峰值位置|',
+             '|---|---:|---:|---:|---:|---|---|']
+    for r in comparison:
+        numbers = ['未观测' if r[k] is None else '{:.3f}'.format(r[k])
+                   for k in ('sf_peak_mib','bp_peak_mib','saved_mib','saving_percent')]
+        lines.append('| {} | {} | {} / {} | {} / {} |'.format(
+            r['period'], ' | '.join(numbers), r['sf_layer'], r['sf_phase'], r['bp_layer'], r['bp_phase']))
+    lines += ['',
+             '## 峰值出现位置与构成', '',
+             'epoch 从 0 开始；SF 是逐层 epoch，BP 是全模型 epoch，不代表等计算进度。',
+             '事件序号仅用于各自运行内定位，不能跨运行相减得到时间差。相等峰值保留首次观测位置。',
+             '执行层不等于存储归属层；峰值时各归属层占用在 CSV 的 peak_owners_json 中。', '',
+             '|区间|SF 层 / 阶段 / epoch / 事件|BP 层 / 阶段 / epoch / 事件|执行层比较|阶段比较|SF 主导类别|BP 主导类别|',
+             '|---|---|---|---|---|---|---|']
+    for r in comparison:
+        lines.append('| {} | {} | {} | {} | {} | {} | {} |'.format(
+            r['period'], peak_location(r,'sf'), peak_location(r,'bp'),
+            r['layer_comparison'],r['phase_comparison'],
+            r['sf_dominant_category'] or '未知',r['bp_dominant_category'] or '未知'))
+    lines += ['', '类别占用、归属层占用和前三大 storage 均来自各自同一个峰值快照，见 comparison-peaks.csv；不是类别独立峰值之和。', '',
              '|算法|统计区间|算法峰值 MiB|事件|', '|---|---|---:|---:|']
     for r in period_rows:
         lines.append('| {} | {} | {} | {} |'.format(r['algorithm'], r['period'],

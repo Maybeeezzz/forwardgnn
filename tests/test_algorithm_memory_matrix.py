@@ -106,6 +106,16 @@ class MatrixTests(unittest.TestCase):
                 self.assertTrue(Path(cmd[1]).is_file())
                 self.assertTrue(Path(cmd[cmd.index('--memory-analysis-rules')+1]).is_file())
 
+    def test_summarize_only_never_launches_training(self):
+        with tempfile.TemporaryDirectory() as d:
+            argv = ['--output', d, '--architectures','SAGE','--depths','2']
+            p = matrix.build_plan(matrix.parse_args(argv))
+            matrix.save(Path(d)/'plan.json',p)
+            with patch.object(matrix.subprocess,'run',side_effect=AssertionError('No training')), patch.object(matrix,'aggregate',return_value=False) as aggregate:
+                self.assertEqual(matrix.main(argv+['--summarize-only']),1)
+            self.assertEqual(aggregate.call_count,1)
+            self.assertFalse((Path(d)/'process-status.json').exists())
+
     def test_dry_run_has_no_side_effects(self):
         with tempfile.TemporaryDirectory() as d:
             out=Path(d)/'not-created'

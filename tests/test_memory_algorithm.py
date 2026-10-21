@@ -8,7 +8,7 @@ import tempfile
 import unittest
 import weakref
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'src'))
-from memory_algorithm_summary import classify, AlgorithmMemorySummary, layer_name
+from memory_algorithm_summary import classify, AlgorithmMemorySummary, layer_name, peak_comparisons, peak_period_row
 import importlib.util
 
 def load_module(name, filename):
@@ -31,6 +31,43 @@ def details(*rows):
 
 
 class AttributionTests(unittest.TestCase):
+    def test_peak_location_and_composition_use_same_snapshot(self):
+        peak = dict(algorithm_bytes=3*2**20, sequence=331, active_layer='layer1',
+                    phase='loss_build', epoch_zero_based=1,
+                    categories_bytes={'saved_for_backward':2*2**20,'gradients':2**20,'model_baseline':100*2**20},
+                    storages=[dict(bytes=2*2**20,category='saved_for_backward',owner='layer1',aliases=['saved.x']),
+                              dict(bytes=2**20,category='gradients',owner='layer2',aliases=['weight.grad']),
+                              dict(bytes=100*2**20,category='model_baseline',owner='layer1',aliases=['data'])])
+        sf = peak_period_row('SF','training',peak)
+        bp = peak_period_row('BP','training',dict(peak,active_layer='layer3',phase='backward',sequence=900))
+        # Exercise CSV round-trip, including epoch zero and string-valued observations.
+        bp['epoch_zero_based'] = '0'
+        result = peak_comparisons([sf,bp])[0]
+        self.assertEqual(result['layer_comparison'],'different')
+        self.assertEqual(result['phase_comparison'],'different')
+        self.assertEqual(result['sf_epoch_zero_based'],1)
+        self.assertEqual(result['bp_epoch_zero_based'],'0')
+        self.assertEqual(result['sf_dominant_category'],'saved_for_backward')
+        self.assertEqual(json.loads(result['sf_peak_owners_json']),{'layer1':2,'layer2':1})
+        self.assertEqual(json.loads(result['sf_top_storages_json'])[0]['aliases'],['saved.x'])
+        self.assertNotIn('model_baseline',json.loads(result['sf_peak_categories_json']))
+        bp['active_layer'] = 'shared'
+        self.assertEqual(peak_comparisons([sf,bp])[0]['layer_comparison'],'unknown')
+
+    def test_sf_bp_peak_savings_missing_and_zero(self):
+        rows = [dict(algorithm='SF',period='training',observed=True,algorithm_observed_peak_mib=80,
+                     active_layer='layer1',phase='loss_build'),
+                dict(algorithm='BP',period='training',observed=True,algorithm_observed_peak_mib=40,
+                     active_layer='layer3',phase='backward')]
+        result = peak_comparisons(rows)
+        self.assertEqual(result[0]['saved_mib'], -40)
+        self.assertEqual(result[0]['saving_percent'], -100)
+        self.assertEqual(result[0]['sf_to_bp_ratio'], 2)
+        self.assertEqual(result[0]['bp_phase'], 'backward')
+        self.assertIsNone(result[1]['saved_mib'])
+        rows[1]['algorithm_observed_peak_mib'] = 0
+        self.assertIsNone(peak_comparisons(rows)[0]['saving_percent'])
+
     def test_aliases_baseline_gradient_and_layer_owners(self):
         d = details(('p',64,"model.layers.0._parameters['weight']",{'is_parameter':True}),
                     ('p',64,'autograd_saved.layer2.0',{'saved_for_backward':True}),

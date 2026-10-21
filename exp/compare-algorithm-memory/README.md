@@ -1,5 +1,7 @@
 # SF/BP 算法保留显存：骨干与深度矩阵
 
+结果分析：[SF 训练算法显存峰值分析（2026-10-21）](sf-peak-analysis.md)，包含峰值层/阶段、主要变量占用和降低峰值的优化优先级。
+
 入口：`exp/compare-algorithm-memory/run.sh`，调度器：`src/compare_algorithm_memory_matrix.py`。
 本目录已从固定两层 SAGE 脚本扩展为参数化矩阵；每个配置启动独立训练进程，串行使用同一 GPU。
 
@@ -148,6 +150,7 @@ bash exp/compare-algorithm-memory/run.sh \
 ```
 
 - `matrix-periods.csv`：dataset / architecture / depth / run_i / algorithm / period，以及该区间的算法观测峰值。
+- `matrix-peak-comparison.csv`：每组 SF/BP 的训练/评估峰值、`saved_mib = BP − SF`、`saving_percent = (BP − SF) / BP × 100`、SF/BP 比值，以及各自的峰值层/阶段。负节省表示 SF 更高；缺失数据和 BP 为零的比例留空。每对的同类表为 `comparison/runN/comparison-peaks.csv`。
 - `matrix-stages.csv`：所有配置的逐层、逐阶段、存储归属和类别分解，包含对应事件。
 - 每个 run 原始 JSON 保留峰值 storage/变量别名；完整命令及参数在 plan.json，实际训练日志在各进程 log。
 - 汇总保留每个 run，不混合不同随机划分，也不将各层独立峰值相加。此版本不自动生成跨 run 均值/标准差。
@@ -155,6 +158,27 @@ bash exp/compare-algorithm-memory/run.sh \
 ```bash
 cat results/algorithm-memory-matrix/matrix-report.md
 ```
+
+仅重新比较已有 SF/BP 峰值，不训练或补跑失败项：
+
+```bash
+cd ~/forwardgnn
+bash exp/compare-algorithm-memory/run.sh \
+  --datasets Amazon-Photo --architectures GCN SAGE GAT \
+  --depths 2 4 8 16 --hidden 128 --runs 1 --seed 100 \
+  --epochs 3 --lr 0.001 --patience -1 --val-every 1 \
+  --output results/algorithm-memory-matrix --summarize-only
+cat results/algorithm-memory-matrix/matrix-report.md
+less -S results/algorithm-memory-matrix/matrix-peak-comparison.csv
+```
+
+这里比较的是同一配置、同一区间中 SF 和 BP **各自的全模型算法峰值**，不要求二者在同一层或同一阶段达到峰值，也不将阶段峰值相加。不完整配对写入 `pair-status.json` 并返回非零退出码。默认报告先展示直接峰值对比，再展示单侧详情。
+
+报告同时展示 **SF/BP 峰值出现位置的差异**：双方执行层、阶段、epoch、事件序号和主导算法变量类别。`layer_comparison`、`phase_comparison` 分别标记 `same`、`different` 或 `unknown`；无法明确归属的 `shared` 层不作为相同层的证据。
+
+`matrix-peak-comparison.csv`（单配置为 `comparison-peaks.csv`）新增双方的 `epoch_zero_based`、`sequence`、`dominant_category`、`dominant_category_mib`、`peak_categories_json`、`peak_owners_json` 和 `top_storages_json`。JSON 字段分别保存峰值当时的算法类别 MiB、存储归属层 MiB、前三大算法 storage 的大小和最多三个变量别名。完整别名仍在原始峰值 summary 中；这些分解来自同一个峰值快照，不能替换为各分类独立峰值。
+
+SF 的 epoch 是逐层训练轮次，BP 的 epoch 是端到端轮次；相同 epoch 不表示相同计算进度。事件序号属于各自进程，不能用 SF/BP 序号差推算时间差。执行层与存储归属层不同：BP 执行某层时仍可能持有其他层的存储。并列峰值保留首次观测位置，报告不声称峰值只出现一次。
 
 只查看训练/评估总量：
 

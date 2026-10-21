@@ -1,11 +1,12 @@
 # 实验与工具入口
 
-所有 16 个 shell 脚本统一放在本目录。每个子目录包含一份 `run.sh` 和一份实验说明 `README.md`。环境安装和 CUDA 验证作为辅助入口一并归档。
+所有 17 个 shell 脚本统一放在本目录。每个子目录包含一份 `run.sh` 和一份实验说明 `README.md`。环境安装和 CUDA 验证作为辅助入口一并归档。
 
 从仓库根目录运行 `bash exp/<名称>/run.sh`；具体参数、输入要求和输出位置见各目录 README。此次整理不运行实验，不改变训练预算。
 
 |目录|用途|
 |---|---|
+| [network-algorithm-memory](network-algorithm-memory/README.md) | MLP/CNN × BP、Local-CE、FF、DFA、SPSA 小规模显存矩阵，支持 compact、dry-run 和 resume |
 | [bp-sparse-cuda-matrix](bp-sparse-cuda-matrix/README.md) | 合成图 CUDA 稀疏后端验证矩阵 |
 | [compare-algorithm-memory](compare-algorithm-memory/README.md) | SF/BP 算法保留显存矩阵：GCN/SAGE/GAT，2/4/8/16 层 |
 | [install-packages](install-packages/README.md) | 实验环境安装 |
@@ -24,3 +25,7 @@
 | [nodeclass-sf](nodeclass-sf/README.md) | 节点分类：SingleForward |
 
 旧入口已迁移，当前文档已更新；历史 results 中的命令/来源路径作为原始记录保留，不重写。
+
+## 文档归档规则
+
+实验专属的设计、运行协议、结果和分析文档与对应 `run.sh` 放在同一实验目录，由该目录 `README.md` 提供链接。跨实验共用的工具说明和统计口径保留在 [docs](../docs/README.md)。历史结果目录中的原始记录不随文档迁移修改。

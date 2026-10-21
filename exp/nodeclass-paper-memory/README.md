@@ -1,5 +1,7 @@
 # 论文节点分类预算下的 SF/BP 显存监控
 
+结果报告：[论文脚本条件下的显存实验统计与差异分析](paper_memory_results.md)。
+
 入口：`exp/nodeclass-paper-memory/run.sh`。
 
 沿用论文节点分类脚本预算，监控 SF/BP 全程分配器显存。
@@ -14,7 +16,7 @@
 bash exp/nodeclass-paper-memory/run.sh --gpu 0 --output results/paper-memory
 ```
 
-该包装脚本不改变调用者工作目录；相对 `--output` 相对于当前终端目录，建议在仓库根目录运行。输出目录、各报告与参数细节见[详细说明](../../docs/paper_memory_reproduction.md)。
+该包装脚本不改变调用者工作目录；相对 `--output` 相对于当前终端目录，建议在仓库根目录运行。输出目录、各报告与参数细节见[详细说明](paper_memory_reproduction.md)。
 
 可使用 `--dry-run` 生成计划；这不是已经执行的实验。`PYTHON` 可选，用于指定 Python 可执行文件。
 

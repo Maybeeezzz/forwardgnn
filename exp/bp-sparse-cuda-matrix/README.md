@@ -14,7 +14,7 @@
 bash exp/bp-sparse-cuda-matrix/run.sh --gpu 0 --output results/bp-sparse-cuda-matrix
 ```
 
-该包装脚本不改变调用者工作目录；相对 `--output` 相对于当前终端目录，建议在仓库根目录运行。输出目录、各报告与参数细节见[详细说明](../../docs/bp_sparse_cuda_matrix.md)。
+该包装脚本不改变调用者工作目录；相对 `--output` 相对于当前终端目录，建议在仓库根目录运行。输出目录、各报告与参数细节见[详细说明](bp_sparse_cuda_matrix.md)。
 
 这些入口统计的是各自定义的进程/边界显存，不应直接等同于算法保留存储；后者使用 [compare-algorithm-memory](../compare-algorithm-memory/README.md)。
 

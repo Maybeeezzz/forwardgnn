@@ -13,7 +13,7 @@ bash exp/nodeclass-bp-sparse/run.sh --gpu 0
 bash exp/nodeclass-bp-sparse/run.sh --gpu 0 --graph-backend edge-index
 ```
 
-结果写入 `results/bp-sparse-results/`。后端结果命名与统计口径参见[详细说明](../../docs/bp_sparse_experiment.md)。参数通过尾部原样转发。
+结果写入 `results/bp-sparse-results/`。后端结果命名与统计口径参见[详细说明](bp_sparse_experiment.md)。参数通过尾部原样转发。
 
 ## 迁移记录
 

@@ -49,10 +49,17 @@ class TensorInventory:
                                stride=list(value.stride()), requires_grad=value.requires_grad,
                                grad_fn=type(value.grad_fn).__name__ if value.grad_fn is not None else None,
                                is_parameter=isinstance(value, self.torch.nn.Parameter))
+                    # Explicit metadata only; does not retain tensors or alter computation.
+                    category = getattr(value, '_memory_algorithm_category', None)
+                    if category is not None:
+                        row['algorithm_category'] = category
+                    explicit_owner = getattr(value, '_memory_owner', None)
+                    if explicit_owner is not None:
+                        row['memory_owner'] = explicit_owner
                     if path.startswith('autograd_saved.'):
                         row['saved_for_backward'] = True
                         row['saved_owner'] = path.split('.')[1]
-                    if id(value) in self.tensor_owners:
+                    if id(value) in self.tensor_owners and explicit_owner is None:
                         row['memory_owner'] = self.tensor_owners[id(value)]
                     if self.on_tensor:
                         self.on_tensor(value, row)
@@ -212,7 +219,7 @@ class LayerMemoryTrace:
         if period is None:
             period = ('evaluation' if name == 'evaluation' else
                       'training' if name in ('forward', 'loss_build', 'backward', 'optimizer_step', 'zero_grad') else 'other')
-        if period not in ('training', 'evaluation', 'other', 'unclassified'):
+        if period not in ('training', 'evaluation', 'warmup', 'other', 'unclassified'):
             raise ValueError('Unknown memory period: '+str(period))
         context = dict(phase=name, layer=layer, epoch_zero_based=epoch, period=period)
         self.scopes.append(context)

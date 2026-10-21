@@ -111,6 +111,10 @@ BP 节点分类和链接预测的 `test()` 均使用 `@torch.no_grad()`，同时
 
 ## 精简输出与矩阵续跑
 
+跨结构实验可在 Tensor/Parameter/buffer 上设置 `_memory_algorithm_category`，并可用 `_memory_owner='layer1'` 指定归属。新增算法类别包括 `local_heads`、`feedback_state`、`perturbation_state`、`parameter_backup`、`update_buffer`。显式标记优先于默认模型基线，解决算法专属参数和固定反馈 buffer 被误排除的问题；多个别名仍按 storage 去重。标记应在设备迁移之后设置，因为 `.to()` 可能替换 buffer 对象。JSON 归因规则也可加 `"override_baseline": true`，仅对明确属于算法的变量使用。没有显式覆盖时维持原有基线优先规则。
+
+公共 scope 接受 `period='warmup'`，其独立峰值在实际观测后才添加到 `period_peaks`，不与 training 合并。新网络矩阵选择在安装追踪器前完成预热，单独记录预热 allocator 数值，避免预热张量影响正式归因。实现与命令见 [网络×算法矩阵](../exp/network-algorithm-memory/README.md)。
+
 独立训练入口增加 `--memory-analysis-output compact`；矩阵入口默认使用 `--memory-output compact`。精简模式仍在每个原有边界执行变量枚举、storage 去重和算法归因，保留各层各阶段汇总及选中的峰值快照，但不写 `memory-events.jsonl` 和 `memory-variables.jsonl`。不能用精简结果恢复完整变量时间线或重新做事件归因；需要原始事件时使用 `full`。compact 不与算子 profiler 模式组合。
 
 训练和评估的峰值仍分开，指标仍是观测到的算法保留 storage，非完整原生临时分配峰值。普通训练日志、运行参数、汇总报告仍保留，旧日志不会自动删除。

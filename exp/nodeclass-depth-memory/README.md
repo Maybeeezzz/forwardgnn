@@ -1,5 +1,7 @@
 # 深度扩展显存基准
 
+结果报告：[SF/BP 深度扩展实验结果](sf_depth_memory_results.md)。
+
 入口：`exp/nodeclass-depth-memory/run.sh`。
 
 SF/BP 深度扩展显存测量，观察层数增长时的占用。
@@ -14,7 +16,7 @@ SF/BP 深度扩展显存测量，观察层数增长时的占用。
 bash exp/nodeclass-depth-memory/run.sh --gpu 0 --output results/depth-memory
 ```
 
-该包装脚本不改变调用者工作目录；相对 `--output` 相对于当前终端目录，建议在仓库根目录运行。输出目录、各报告与参数细节见[详细说明](../../docs/sf_depth_memory.md)。
+该包装脚本不改变调用者工作目录；相对 `--output` 相对于当前终端目录，建议在仓库根目录运行。输出目录、各报告与参数细节见[详细说明](sf_depth_memory.md)。
 
 可使用 `--dry-run` 生成计划；这不是已经执行的实验。`PYTHON` 可选，用于指定 Python 可执行文件。
 

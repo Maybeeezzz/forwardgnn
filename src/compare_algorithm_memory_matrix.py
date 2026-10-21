@@ -30,6 +30,7 @@ def parse_args(argv=None):
     p.add_argument('--gpu', type=int, default=0)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--resume', action='store_true', help='Skip complete matching configurations in an existing matrix.')
+    p.add_argument('--summarize-only', action='store_true', help='Rebuild comparisons from existing complete runs; never train.')
     p.add_argument('--memory-output', choices=['compact', 'full'], default='compact',
                    help='compact retains summaries and peak snapshots, without per-event JSONL.')
     p.add_argument('--dry-run', action='store_true', help='Print plan; no imports of torch, files, or subprocesses.')
@@ -90,7 +91,8 @@ def save(path, value):
 def write_csv(path, rows):
     with path.open('w', newline='') as f:
         if rows:
-            w = csv.DictWriter(f, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
+            fields = list(dict.fromkeys(key for row in rows for key in row))
+            w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(rows)
 
 
 def matching_arguments(case, args):
@@ -205,9 +207,37 @@ def aggregate(plan, statuses, output, execute=subprocess.run):
     save(output/'pair-status.json',pairs)
     write_csv(output/'matrix-periods.csv',periods)
     write_csv(output/'matrix-stages.csv',stages)
+    from memory_algorithm_summary import peak_comparisons, peak_location
+    comparisons = []
+    for pair in pairs:
+        if pair['status'] != 'completed':
+            continue
+        identity = {k: pair[k] for k in ('dataset','architecture','depth','run_i')}
+        selected = [r for r in periods if all(r[k] == v for k,v in identity.items())]
+        comparisons.extend(dict(identity, **r) for r in peak_comparisons(selected))
+    write_csv(output/'matrix-peak-comparison.csv', comparisons)
     lines=['# SF/BP 算法保留存储矩阵', '',
            '单位 MiB；按 run 保留，不将不同层或分类的独立峰值相加。失败配置没有数值，不当成零。',
-           '评估值含仍常驻的训练状态，不等于评估新增量。', '',
+           '评估值含仍常驻的训练状态，不等于评估新增量。',
+           'SF 节省量 = BP − SF；节省比例 = (BP − SF) / BP；负值表示 SF 更高。', '',
+           '|数据集|骨干|层数|run|区间|SF 峰值 MiB|BP 峰值 MiB|SF 节省 MiB|SF 节省 %|',
+           '|---|---|---:|---:|---|---:|---:|---:|---:|']
+    for r in comparisons:
+        numbers = ['未观测' if r[k] is None else '{:.3f}'.format(r[k])
+                   for k in ('sf_peak_mib','bp_peak_mib','saved_mib','saving_percent')]
+        lines.append('| {} | {} | {} | {} | {} | {} |'.format(
+            r['dataset'],r['architecture'],r['depth'],r['run_i'],r['period'],' | '.join(numbers)))
+    lines += ['', '## SF/BP 峰值出现位置', '',
+           'epoch 从 0 开始；SF 是逐层 epoch，BP 是全模型 epoch。事件编号不可跨运行比较时间。',
+           'same/different 比较执行层或阶段标签；unknown 表示缺失或无法可靠定位。相等峰值保留首次观测。', '',
+           '|数据集 / 骨干 / 层数 / run|区间|SF 层 / 阶段 / epoch / 事件|BP 层 / 阶段 / epoch / 事件|执行层比较|阶段比较|SF 主导类别|BP 主导类别|',
+           '|---|---|---|---|---|---|---|---|']
+    for r in comparisons:
+        lines.append('| {} / {} / {} / {} | {} | {} | {} | {} | {} | {} | {} |'.format(
+            r['dataset'],r['architecture'],r['depth'],r['run_i'],r['period'],
+            peak_location(r,'sf'),peak_location(r,'bp'),r['layer_comparison'],r['phase_comparison'],
+            r['sf_dominant_category'] or '未知',r['bp_dominant_category'] or '未知'))
+    lines += ['', '峰值时的类别与存储归属层分解、前三大 storage 变量别名见 matrix-peak-comparison.csv；均取自各自的同一峰值事件。', '',
            '|数据集|骨干|层数|run|方法|区间|峰值 MiB|', '|---|---|---:|---:|---|---|---:|']
     for row in periods:
         lines.append('| {} | {} | {} | {} | {} | {} | {} |'.format(
@@ -221,13 +251,16 @@ def aggregate(plan, statuses, output, execute=subprocess.run):
 
 
 def run_matrix(a, plan):
-    if a.output.exists() and any(a.output.iterdir()) and not a.resume:
+    if a.output.exists() and any(a.output.iterdir()) and not (a.resume or a.summarize_only):
         raise ValueError('Use a new/empty --output directory, or --resume for the same matrix.')
-    if a.resume:
+    if a.resume or a.summarize_only:
         plan = resume_plan(a, plan)
     if a.dry_run:
         print(json.dumps(plan,indent=2))
         return 0
+    if a.summarize_only:
+        statuses = [dict(status='completed' if c['action']=='skip' else 'unavailable') for c in plan['cases']]
+        return 0 if aggregate(plan, statuses, a.output) else 1
     a.output.mkdir(parents=True,exist_ok=True)
     attempt_id = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
     if a.resume:
